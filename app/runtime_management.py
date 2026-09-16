@@ -1,9 +1,11 @@
 """Initialize management only for an explicitly started server, never at import."""
 
+import os
 import sqlite3
 import sys
 from pathlib import Path
 
+from . import buddy
 from .admin_api import install_admin
 from .audit_store import AuditStore
 from .control_store import ControlStore
@@ -59,6 +61,8 @@ class UnavailableAudit:
 
 def initialize(gateway, args, argv=None):
     config = gateway.CONFIG
+    config["auto_accept_buddy"] = buddy.auto_accept_from_env(os.environ)
+    config["auto_accept_buddy_source"] = "environment" if "CODEBUDDY2API_AUTO_ACCEPT_BUDDY" in os.environ else "default"
     root = gateway.managed_auth_dir()
     control = ControlStore(root / "control.sqlite3")
     config["control_store"] = control
@@ -94,7 +98,7 @@ def install(gateway):
     from .inbound_limits import ConcurrencyLimitMiddleware, InboundBodyLimitMiddleware
     app.add_middleware(InboundBodyLimitMiddleware, config=config)
     app.add_middleware(ConcurrencyLimitMiddleware, config=config)
-    # 最外层先校验请求头；未鉴权的慢请求不得占用推理名额或进入请求体缓冲。
+    # Authenticate headers before consuming inference capacity or buffering request bodies.
     app.add_middleware(InferenceAuthMiddleware, config=config)
     install_pages(app, Path(gateway.__file__).resolve().parent / "web" / "dist")
 

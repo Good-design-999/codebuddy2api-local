@@ -39,6 +39,14 @@ Compose explicitly passes some environment variables and CLI flags, so deleting 
 
 Environment variables include `CODEBUDDY_AUTH_DIR`, `CODEBUDDY_IMPORT_DIR`, `CODEBUDDY2API_KEY`, `CODEBUDDY2API_ADMIN_CSRF`, `CODEBUDDY2API_KEEP_TOOL_METADATA`, `CODEBUDDY2API_LOG`, `CODEBUDDY2API_MAX_IMAGES`, `CODEBUDDY2API_IMAGE_POLICY`, `CODEBUDDY2API_MAX_REQUEST_BYTES`, `CODEBUDDY2API_LOG_BODY_LIMIT`, `CODEBUDDY2API_FAILOVER_MAX` and `CODEBUDDY2API_RETRY_WRITE_TIMEOUT`. See [deployment](deployment.md) for startup examples.
 
+`CODEBUDDY2API_AUTO_ACCEPT_BUDDY` is startup-only and defaults to `false`. It preauthorizes enabled domestic accounts for first-Buddy onboarding, agreement and travel; automatic travel still respects its account switch. `first_buddy` needs no acceptance API: pending states, including `not_accepted`, allow one real domestic WorkBuddy conversation on that account. Prefer an eligible zero-rate model, otherwise the lowest known rate; request at most 32 output tokens with possible credit usage. Other reward tasks, paid boxes, pet switching and international trials are excluded.
+
+Manual `POST /admin/credentials/{id}/travel` returns `buddy_confirmation` with official terms and a separate `authorization` scope. Submit `{"confirm_buddy":true,"agreement_revision":"<returned revision>"}` after consent; old adoption-only revisions are rejected. `can_claim` describes eligibility and never disables consent.
+
+`control.sqlite3` preserves consent and one actual onboarding conversation per account across restarts. A live preflight cancellation releases only its own unsent reservation; unknown or sent attempts are never released automatically. Historical acceptance records do not block an unsent conversation. Only official task completion permits adoption. Unconfirmed first-claim sends remain reserved beyond 24 hours and only reconcile through reads; pre-claim failures may resume after backoff. Keep this database when upgrading; travel-status and balance sync remain read-only.
+
+Travel claims and departures share an account-scoped write reservation. Uncertain results do not expire or replay; fresh status reads reconcile them without issuing upstream writes. Store failures stop claims and departures, and local readback updates preserve receipt ownership across processes.
+
 Trial credits are manual-only for eligible `intl-work` accounts: use the credential row's claim drawer or `POST /admin/credentials/{id}/trial`. Startup, periodic maintenance and balance sync never claim. Results expose safe error categories, HTTP/business codes and retry time; response bodies are capped at 64 KiB and never returned to the browser. Success/already-claimed records persist in `auth/trial-ledger.json`; failures wait at least 24 hours before another manual attempt. Keep this file when upgrading.
 
 `CODEBUDDY2API_AUTO_TRIAL` and `--auto-trial` are retired: old startup options warn and do nothing; saved Boolean `auto_trial` settings are ignored on load. Remove them from deployment configuration. Before reverting to older code, check these old settings to avoid re-enabling automatic claims.
@@ -78,6 +86,8 @@ Use a source/image build and Compose configuration containing this feature; recr
 | `GET /admin/credits` · `POST /admin/checkin` | Inspect credits; daily-idempotent check-in followed by domestic travel when enabled |
 | `POST /admin/sync` | Synchronize all enabled accounts' balances, catalogs and usage; no check-in or trial claims |
 | `POST /admin/credentials/{id}/{action}` | Single-account `refresh`, `checkin`, `sync`, `travel-status` (query only), `travel` (claim then dispatch), or `trial` (one-time trial credits) |
+
+Travel results include `phase`, optional safe `error_kind`/`http_status`/`code`, and snapshot `remaining_seconds`. `claimed`/`departed` remain true for confirmed writes even if a later query sets `ok=false` and `stale=true`; query status before another attempt.
 
 Pages use `/dashboard/*`, management APIs use `/admin/*`, and clients retain `/v1/*`. `/cn` and `/intl` API prefixes are not registered. Automatic model routing requires no client URL changes.
 

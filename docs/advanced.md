@@ -15,6 +15,7 @@ Compose explicitly passes some environment variables and CLI flags, so deleting 
 | `--host` / `--port` | `127.0.0.1` / `8787` | Local listener |
 | `--api-key` | none | Shared management and inference key; management is locked without it |
 | `--admin-csrf [true/false]` | `true` | Startup-only management Origin/CSRF checks; disabling does not bypass API-key or session authentication |
+| `--admin-allowed-origins` | none | Extra trusted management Origins (comma-separated; bare domains mean HTTPS) for reverse-proxy sign-in; hot and WebUI-editable |
 | `--auth-file` | scan `auth/` | Explicit credential file, repeatable; disables scanning other files |
 | `--log` | none | Additional text logs, 50 MiB rotation and 2 backups; SQLite auditing remains enabled |
 | `--desensitize` | off | Adapt fixed CLI templates, compact runtime prompts and mask keywords with zero-width characters |
@@ -43,18 +44,6 @@ Compose explicitly passes some environment variables and CLI flags, so deleting 
 
 Environment variables include `CODEBUDDY_AUTH_DIR`, `CODEBUDDY_IMPORT_DIR`, `CODEBUDDY2API_KEY`, `CODEBUDDY2API_ADMIN_CSRF`, `CODEBUDDY2API_ADMIN_ORIGINS`, `CODEBUDDY2API_KEEP_TOOL_METADATA`, `CODEBUDDY2API_LOG`, `CODEBUDDY2API_MAX_IMAGES`, `CODEBUDDY2API_IMAGE_POLICY`, `CODEBUDDY2API_MAX_REQUEST_BYTES`, `CODEBUDDY2API_LOG_BODY_LIMIT`, `CODEBUDDY2API_FAILOVER_MAX` and `CODEBUDDY2API_RETRY_WRITE_TIMEOUT`. See [deployment](deployment.md) for startup examples.
 
-`CODEBUDDY2API_AUTO_ACCEPT_BUDDY` is startup-only and defaults to `false`. It preauthorizes enabled domestic accounts for first-Buddy onboarding, agreement and travel; automatic travel still respects its account switch. `first_buddy` needs no acceptance API: pending states, including `not_accepted`, allow one real domestic WorkBuddy conversation on that account. Prefer an eligible zero-rate model, otherwise the lowest known rate; request at most 32 output tokens with possible credit usage. Other reward tasks, paid boxes, pet switching and international trials are excluded.
-
-Manual `POST /admin/credentials/{id}/travel` returns `buddy_confirmation` with official terms and a separate `authorization` scope. Submit `{"confirm_buddy":true,"agreement_revision":"<returned revision>"}` after consent; old adoption-only revisions are rejected. `can_claim` describes eligibility and never disables consent.
-
-`control.sqlite3` preserves consent and one actual onboarding conversation per account across restarts. A live preflight cancellation releases only its own unsent reservation; unknown or sent attempts are never released automatically. Historical acceptance records do not block an unsent conversation. Only official task completion permits adoption. Unconfirmed first-claim sends remain reserved beyond 24 hours and only reconcile through reads; pre-claim failures may resume after backoff. Keep this database when upgrading; travel-status and balance sync remain read-only.
-
-Travel claims and departures share an account-scoped write reservation. Uncertain results do not expire or replay; fresh status reads reconcile them without issuing upstream writes. Store failures stop claims and departures, and local readback updates preserve receipt ownership across processes.
-
-Trial credits are manual-only for eligible `intl-work` accounts: use the credential row's claim drawer or `POST /admin/credentials/{id}/trial`. Startup, periodic maintenance and balance sync never claim. Results expose safe error categories, HTTP/business codes and retry time; response bodies are capped at 64 KiB and never returned to the browser. Success/already-claimed records persist in `auth/trial-ledger.json`; failures wait at least 24 hours before another manual attempt. Keep this file when upgrading.
-
-`CODEBUDDY2API_AUTO_TRIAL` and `--auto-trial` are retired: old startup options warn and do nothing; saved Boolean `auto_trial` settings are ignored on load. Remove them from deployment configuration. Before reverting to older code, check these old settings to avoid re-enabling automatic claims.
-
 ### Tool metadata retention
 
 Off by default, preserving the existing policy: desensitization strips tool descriptions, and Responses tool projection also strips them; `--no-compact` does not change this. When enabled, Chat, Responses and Messages retain supported tool descriptions and string `description/title` annotations in parameter schemas. With desensitization enabled, retained text is still processed. Prompt compaction and existing content-filter retry conditions/counts are unchanged; fallback processing also respects this option.
@@ -71,9 +60,6 @@ Both settings are available in the WebUI; their environment variables are `CODEB
 
 The account limit defaults to `0`. Positive limits skip full accounts within existing routing and free-first rules; a full free tier never spills into paid accounts. No capacity returns `503 / credential_concurrency_limit` with `Retry-After: 3`, without queueing or penalizing the account. Completion, cancellation and failed-account rotation release capacity. The credentials API exposes `in_flight` and `max_in_flight`. Only the three client generation endpoints count; limits are per process, not shared between instances. Setting `0` restores unlimited account capacity without interrupting active requests.
 
-Before downgrading the source, remove the new CLI arguments and restore a control-store backup without these keys; disabling the features does not remove persisted settings.
-
-
 ### Request context
 
 Generation responses carry a gateway-generated `X-Request-ID` for correlation with text logs and available audit details. Response-body and tool-call IDs are unchanged; client request IDs are not trusted or used for deduplication.
@@ -82,17 +68,23 @@ Generation responses carry a gateway-generated `X-Request-ID` for correlation wi
 
 In scoped mode, optionally send `X-Codebuddy-Session-ID`, `metadata.conversation_id` / `metadata.conversationId`, or top-level `conversation_id` / `conversationId`. Values must agree; conflicting, non-string, control-character or over-512-UTF-8-byte values return 400. Empty values fall back to a fingerprint of adapted instructions and the first user input, including image references; URLs are not fetched. Without reliable input a temporary session is used. Identical inputs without explicit IDs remain indistinguishable; `user`, `metadata.user_id` and `prompt_cache_key` are not session IDs. Raw hints are neither logged nor forwarded upstream.
 
-Switch back to `legacy` to restore old behavior for new requests; in-flight requests retain their initial mode. Before source downgrade, remove the new startup option and restore a compatible control-store backup without `request_context_mode`.
+Switch back to `legacy` to restore old behavior for new requests; in-flight requests retain their initial mode.
 
+## Automation and rewards
 
-### Model declarations and image compatibility
+Automatic check-in and Buddy travel are per-account switches (WebUI credentials page): on by default domestically, off internationally, applied live without restart.
 
-`/v1/models` retains its existing fields and adds `capabilities`, `limits` and `metadata_by_profile`; management and routing previews expose the same metadata. Capabilities use `supported`, `unsupported`, `mixed` or `unknown`. Limits carry `state` (`known`, `mixed`, `unknown`) and `value`; only unanimous known limits have a numeric value. Per-profile arrays preserve distinct account declarations without identities. Safe descriptions, capabilities, windows, reasoning options, related models and parameter suggestions are allowlisted; credentials, internal configuration and authenticated URLs are excluded. These are upstream declarations, not native-model or measured guarantees; suggestions do not override requests.
+`CODEBUDDY2API_AUTO_ACCEPT_BUDDY` is startup-only and defaults to `false`. It preauthorizes enabled domestic accounts for first-Buddy onboarding, agreement and travel; automatic travel still respects its account switch. `first_buddy` needs no acceptance API: pending states, including `not_accepted`, allow one real domestic WorkBuddy conversation on that account. Prefer an eligible zero-rate model, otherwise the lowest known rate; request at most 32 output tokens with possible credit usage. Other reward tasks, paid boxes, pet switching and international trials are excluded.
 
-`model_capability_guard` defaults to `true`; use WebUI settings, `--model-capability-guard false` or `CODEBUDDY2API_MODEL_CAPABILITY_GUARD=false` to disable it. Explicit mismatches return 400 before sending, within existing bindings and the current free-first tier; unknown capabilities remain compatible. Requests retain their entry-time switch. Checks cover images, tools/history, declared reasoning options and the `max_tokens` output limit (including mapped Responses `max_output_tokens`); input tokens are not estimated, `max_completion_tokens` is not renamed or checked against this limit, and Anthropic thinking budgets are not converted. Disabling this guard leaves authentication, catalog authorization, capacity and size limits intact.
+Manual `POST /admin/credentials/{id}/travel` returns `buddy_confirmation` with official terms and a separate `authorization` scope. Submit `{"confirm_buddy":true,"agreement_revision":"<returned revision>"}` after consent; old adoption-only revisions are rejected. `can_claim` describes eligibility and never disables consent.
 
-Both international profiles merge image-bearing consecutive `user` runs only after routing, preserving content order and image data. Domestic bodies, text-only runs and system/assistant/tool boundaries remain unchanged. Conflicting message attributes or unrepresentable content return `400 / image_user_run_not_mergeable`; final byte limits still apply. This compatibility step remains enabled when capability preflight is disabled; it neither adds retries nor makes a text model natively visual. Downgrading source also requires removing the new startup option and any persisted `model_capability_guard` key using a compatible control-store backup.
+`control.sqlite3` preserves consent and one actual onboarding conversation per account across restarts. A live preflight cancellation releases only its own unsent reservation; unknown or sent attempts are never released automatically. Historical acceptance records do not block an unsent conversation. Only official task completion permits adoption. Unconfirmed first-claim sends remain reserved beyond 24 hours and only reconcile through reads; pre-claim failures may resume after backoff. Keep this database when upgrading; travel-status and balance sync remain read-only.
 
+Travel claims and departures share an account-scoped write reservation. Uncertain results do not expire or replay; fresh status reads reconcile them without issuing upstream writes. Store failures stop claims and departures, and local readback updates preserve receipt ownership across processes.
+
+Trial credits are manual-only for eligible `intl-work` accounts: use the credential row's claim drawer or `POST /admin/credentials/{id}/trial`. Startup, periodic maintenance and balance sync never claim. Results expose safe error categories, HTTP/business codes and retry time; response bodies are capped at 64 KiB and never returned to the browser. Success/already-claimed records persist in `auth/trial-ledger.json`; failures wait at least 24 hours before another manual attempt. Keep this file when upgrading.
+
+`CODEBUDDY2API_AUTO_TRIAL` and `--auto-trial` are retired: old startup options warn and do nothing; saved Boolean `auto_trial` settings are ignored on load. Remove them from deployment configuration. Before reverting to older code, check these old settings to avoid re-enabling automatic claims.
 
 ## APIs and authentication
 
@@ -101,7 +93,7 @@ Both international profiles merge image-bearing consecutive `user` runs only aft
 | `POST /v1/chat/completions` | OpenAI Chat Completions |
 | `POST /v1/responses` | OpenAI Responses |
 | `POST /v1/messages` | Anthropic Messages |
-| `POST /v1/messages/count_tokens` | Compatibility stub; currently returns `{"input_tokens":0}` without counting tokens |
+| `POST /v1/messages/count_tokens` | Character-based heuristic token estimate for budgeting, not an exact count |
 | `GET /v1/models` | Available models, multipliers and safe per-profile declarations |
 | `GET /v1/dashboard/billing/subscription` | Converted credit totals; `codebuddy_balance_usd` is the remaining balance |
 | `GET /v1/dashboard/billing/usage` | `total_usage` in cents and daily breakdowns |
@@ -157,15 +149,9 @@ Select client models from the WebUI or `GET /v1/models`. Raw catalogs remain cac
 
 International CLI and WorkBuddy use a deduplicated shared view from enabled, catalog-ready international accounts. A target account must have its own synchronized catalog; its existing model declarations win unchanged. Missing IDs inherit shared declarations, retaining `catalog_source` and safe `source_variants`. Conflicting inherited rates use the higher known rate, limits the smaller known value, reasoning options their intersection and differing descriptive fields are omitted; unknown prices never mean free. Domestic catalogs, credentials, balances, bindings and `auto` defaults remain independent. Shared rates are catalog references, not billing or permission guarantees.
 
-Each `/v3/config` refresh caches the agent picker subset as `models` and the account root table
-as `serves`. Routing and `GET /v1/models` merge these candidates, with picker metadata winning
-for duplicate IDs. Both scopes retain `disabled` and `availableModels` filtering; models without
-tool support are excluded.
+Each `/v3/config` refresh caches the agent picker subset as `models` and the account root table as `serves`. Routing and `GET /v1/models` merge these candidates, with picker metadata winning for duplicate IDs. Both scopes retain `disabled` and `availableModels` filtering; models without tool support are excluded.
 
-The root table is not a guarantee that a backend serves every listed model; measured `11102`
-avoidance still applies. Unknown account catalogs do not authorize dispatch and must not trigger
-a premature all-backends-unsupported 404; they retain the retryable readiness state.
-Legacy cache entries without `serves` use the picker until the next refresh.
+The root table is not a guarantee that a backend serves every listed model; measured `11102` avoidance still applies. Unknown account catalogs do not authorize dispatch and must not trigger a premature all-backends-unsupported 404; they retain the retryable readiness state. Legacy cache entries without `serves` use the picker until the next refresh.
 
 Beyond standard model fields, `credits` is the lowest source multiplier: `0.0` identifies a zero-multiplier source and `null` means no parseable multiplier was declared. `credits_by_profile` provides source details, such as `{"intl-work":0.0,"cn-cli":0.03}`. Compatible clients may ignore these fields; multipliers are not guaranteed to stay unchanged.
 
@@ -184,6 +170,14 @@ Credential domain / token issuer determine the product identity. Chat and refres
 - WebUI region, product and credential bindings strictly limit candidates; unavailable bindings never fall back to unselected accounts. Disabled models also reject direct requests. Renaming hides the original ID unless you choose to retain it.
 - Sent requests are not replayed against another account because of account availability or HTTP errors; later requests select again. Pending catalog/credential readiness usually returns 503 with `Retry-After`; unsupported or disabled models return 404.
 
+### Model declarations and image compatibility
+
+`/v1/models` retains its existing fields and adds `capabilities`, `limits` and `metadata_by_profile`; management and routing previews expose the same metadata. Capabilities use `supported`, `unsupported`, `mixed` or `unknown`. Limits carry `state` (`known`, `mixed`, `unknown`) and `value`; only unanimous known limits have a numeric value. Per-profile arrays preserve distinct account declarations without identities. Safe descriptions, capabilities, windows, reasoning options, related models and parameter suggestions are allowlisted; credentials, internal configuration and authenticated URLs are excluded. These are upstream declarations, not native-model or measured guarantees; suggestions do not override requests.
+
+`model_capability_guard` defaults to `true`; use WebUI settings, `--model-capability-guard false` or `CODEBUDDY2API_MODEL_CAPABILITY_GUARD=false` to disable it. Explicit mismatches return 400 before sending, within existing bindings and the current free-first tier; unknown capabilities remain compatible. Requests retain their entry-time switch. Checks cover images, tools/history, declared reasoning options and the `max_tokens` output limit (including mapped Responses `max_output_tokens`); input tokens are not estimated, `max_completion_tokens` is not renamed or checked against this limit, and Anthropic thinking budgets are not converted. Disabling this guard leaves authentication, catalog authorization, capacity and size limits intact.
+
+Both international profiles merge image-bearing consecutive `user` runs only after routing, preserving content order and image data. Domestic bodies, text-only runs and system/assistant/tool boundaries remain unchanged. Conflicting message attributes or unrepresentable content return `400 / image_user_run_not_mergeable`; final byte limits still apply. This compatibility step remains enabled when capability preflight is disabled; it neither adds retries nor makes a text model natively visual.
+
 ## Request boundaries
 
 - All three generation protocols normalize `developer` to `system`, move an existing system message first or insert a default. This normalization does not mutate the caller's payload. Responses projection and optional desensitization process content separately; the whole pipeline is not a verbatim pass-through.
@@ -195,7 +189,6 @@ Credential domain / token issuer determine the product identity. Chat and refres
 - Valid upstream `Retry-After` values (0–86400 seconds or equivalent HTTP dates) are returned as seconds before streaming starts; 429 only cools the selected account/model. Invalid or expired values fall back to the body's reset time or 600 seconds. Pool-generated 429 responses include the remaining wait.
 - Chat and Responses preserve an explicit client `prompt_cache_key` without generating one; cache hits and savings depend on the upstream.
 - Unsupported capabilities are rejected rather than silently degraded: chat `n` other than 1 and the Responses state fields `previous_response_id`/`conversation` (this gateway keeps no server-side response state) return 400; length-truncated or content-filtered Responses are reported as `incomplete`, never disguised as `completed`.
-- `/v1/messages/count_tokens` returns a character-based heuristic estimate for budgeting, not an exact count.
 - Text logs and SQLite auditing have separate budgets. Logs contain bounded, redacted previews, not complete original requests. Treat logs, credential exports and backups as private data.
 
 ## Deployment exposure and credential intake
@@ -215,7 +208,7 @@ Credential domain / token issuer determine the product identity. Chat and refres
 
 | Symptom | Behavior / action |
 |---------|-------------------|
-| Cannot sign in to WebUI | Configure an API key; sign in and restart unfinished OAuth after changing it |
+| Cannot sign in to WebUI | Configure an API key; sign in and restart unfinished OAuth after changing it. Behind an HTTPS reverse proxy, trust the public origin via `admin_allowed_origins` (see above) |
 | Local 401 | Client key differs from the gateway key |
 | Upstream 401 / 403 | Credential-level authentication circuit opens; inspect and log in again in the WebUI |
 | 429 | Cool down that upstream model on the credential; later requests rebind automatically. All candidates cooling down still returns 429; with `--failover-max` the in-flight request is replayed on another credential instead |
@@ -224,10 +217,14 @@ Credential domain / token issuer determine the product identity. Chat and refres
 | Post-send disconnect, read timeout or protocol error | No network replay, avoiding duplicate billing; logs include exception type and elapsed time |
 | Client hangs up before a non-streaming response is ready | The upstream call is cancelled and its concurrency slot returned at once; the request is audited as `cancelled`, never as a completed answer. Streaming already behaves this way |
 | Streaming request fails before the first byte | Reported with the real HTTP status, exactly like `stream=false`. A 200 carrying only an in-band `error` event is read by clients as an empty answer, so the session ends silently while the audit log records a success |
-| Credential failover (`--failover-max`) | Off by default. When enabled, a failure that happened before any byte reached the client is retried on another credential, up to N times, and is audited as `success` with a `failover_recovered` attempt marker. Only upstream HTTP rejections (401/403/429/502/503/504) and request bodies the upstream provably never started receiving (`ConnectError`/`ConnectTimeout`) qualify: content-filter rejections, 502s synthesized from an already-open stream, read timeouts and protocol errors are never replayed, and if no other credential is available the original status is surfaced — **Billing**: 401/403/429/503 and those transport failures happen at admission time and cannot be billed; a 502/504 may already have been processed and billed upstream, but its result never reached the client, so refusing to replay it recovers no credit — it only turns a paid-for attempt into a broken session. Such replays are tagged `上游可能已处理该请求` in the log for reconciliation |
-| Write-timeout replay (`--retry-write-timeout`) | Off by default. A write timeout proves the declared body was not fully sent, not that the upstream ignored the bytes it did receive, so it is excluded from both the connect retry and credential failover until explicitly enabled. Long cross-border sessions fail here more often than in the handshake, so operators who have confirmed their upstream does not bill partial bodies can turn this on; those replays carry the same `上游可能已处理该请求` log tag |
+| Credential failover (`--failover-max`) | Off by default. When enabled, a failure before any byte reached the client is retried on another credential up to N times and audited as `success` with a `failover_recovered` marker. Qualifying failures: upstream HTTP 401/403/429/502/503/504 rejections and bodies the upstream provably never received (`ConnectError`/`ConnectTimeout`). Content-filter rejections, 502s from an already-open stream, read timeouts and protocol errors are never replayed; without another credential the original status surfaces. Billing note: 401/403/429/503 and transport failures happen at admission and cannot be billed; a 502/504 may already have been billed upstream, but its result never reached the client, so refusing to replay recovers no credit — it only turns a paid-for attempt into a broken session. Such replays are tagged `上游可能已处理该请求` in the log for reconciliation |
+| Write-timeout replay (`--retry-write-timeout`) | Off by default. A write timeout proves the body was not fully sent, not that the upstream ignored the bytes it received, so it stays excluded from connect retry and failover until enabled. Long cross-border sessions fail here more often than in the handshake; enable only when the upstream is confirmed not to bill partial bodies. These replays carry the same `上游可能已处理该请求` log tag |
 | Malformed tool calls | Aggregate validation permits up to `--tool-call-max-retry` (default 3) additional generations, each consuming credits and recorded with its usage in the attempt details; exhaustion returns an error |
 | Empty or truncated upstream stream | No valid output, a missing end marker or an error is not reported as success |
 | Content-filter rejection | With desensitization and `--no-compact`, a complete non-streaming filter-only rejection may receive one shorter-template retry on the same account. No streaming filter retry, circuit opening or account rotation |
 | Slow responses | Inspect timing and failed attempts in the WebUI, then choose a faster model supported by the account |
 | Same account invalidated elsewhere | Independent desktop/gateway refreshes may invalidate each other; prefer separate browser login or stop using the other client |
+
+## Downgrades and rollback
+
+Feature switches hold no hidden state: disabling a guard or mode stops it for new requests, and reverting source restores previous behavior. The exceptions are persisted settings and automation state: `control.sqlite3` stores WebUI settings, model rules and reward reservations, and older code rejects unknown fields. Before downgrading source, remove newly added startup options and restore a control-store backup from before the upgrade, including its WAL/SHM files without mixing. Rollback never undoes completed upstream check-ins, claims or travel dispatches.

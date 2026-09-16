@@ -16,22 +16,13 @@ On first setup, run `cp .env.example .env` and set `CODEBUDDY2API_KEY` to your o
 | `CODEBUDDY_AUTH_DIR` | Local Python data directory; defaults to the repository's `auth/`. Compose sets it to `/data/auth` inside the container |
 | `CODEBUDDY_IMPORT_DIR` | Optional import directory; defaults to `imports/` under the data directory. Use container paths with Compose |
 
-The example lists all active runtime variables, including inbound/aggregate byte limits, concurrency, tool retries and failover. Compose forwards these limits; unset optional tool-metadata/failover settings remain configurable in the WebUI. Zero disables the aggregate/concurrency limit or extra retries, not the required positive inbound limit.
+The example lists all active runtime variables, including inbound/aggregate byte limits, concurrency, tool retries and failover. Compose forwards these limits; unset optional settings (tool metadata, origin allowlist, failover and similar) remain configurable in the WebUI. Zero disables the aggregate/concurrency limit or extra retries, not the required positive inbound limit.
 
 Compose reads declared variables from `.env`; shell variables take precedence. The default host mapping is loopback. Set a random key, HTTPS and access restrictions before allowing remote connections. Container binding remains `0.0.0.0:8787`; change host exposure using `BIND/PORT`, not container listener arguments.
 
-Mount the entire data directory on writable local storage, not just one SQLite file, and do not share it between instances. Stop the gateway and back up the whole directory before upgrading; see [data and backups](webui.md).
+Mount the entire data directory on writable local storage, not just one SQLite file, and do not share it between instances. Stop the gateway and back up the whole directory before upgrading; see [data and backups](webui.md#data-and-backups).
 
 ## Docker Compose
-
-### Build current source
-
-```bash
-docker compose build
-docker compose up -d
-```
-
-The build includes the WebUI; Node.js and Python are not required on the host. Open `http://127.0.0.1:8787/dashboard` to add accounts.
 
 ### Use published images
 
@@ -44,11 +35,30 @@ docker compose up -d --no-build
 
 Images support `linux/amd64` and `linux/arm64`. Version tags pin releases, `latest` follows stable releases and `edge` follows main. Features depend on the selected version; older images may not include the current source's WebUI.
 
-After editing `.env`, repeat the appropriate `docker compose up -d` command to recreate containers whose configuration changed. Rebuild after updating local source; select and pull the new version when using published images. Preserve the data directory to retain login state.
+### Build current source
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+The build includes the WebUI; Node.js and Python are not required on the host. Open `http://127.0.0.1:8787/dashboard` to add accounts.
+
+### Upgrades and recreates
+
+After editing `.env`, repeat the appropriate `docker compose up -d` command to recreate containers whose configuration changed. Rebuild after updating local source; select and pull the new version when using published images. `docker compose restart` alone does not apply changed environment values. Preserve the data directory to retain login state.
+
+## Reverse proxy and HTTPS
+
+The default loopback mapping is the only safe exposure without extra work. When you put the gateway behind a reverse proxy on a domain:
+
+- Terminate TLS at the proxy and forward the original Host and scheme (`proxy_set_header Host $host` and `X-Forwarded-Proto $scheme` in nginx).
+- The WebUI compares the browser's `Origin` with the address the gateway actually sees. If the proxy rewrites the forwarded Host/scheme — for example HTTPS on the domain while the container sees HTTP — sign-in fails the Origin check. Trust your public address in **Settings → Extra trusted management origins（管理页额外信任来源）** or with `CODEBUDDY2API_ADMIN_ORIGINS` / `--admin-allowed-origins` instead of disabling CSRF protection; see [Management Origin checks](advanced.md#management-origin--csrf-switch).
+- Keep authentication enabled (`CODEBUDDY2API_KEY`) for any non-loopback exposure.
 
 ## Local Python setup
 
-Requires Python, uv, and Node.js with the vp CLI to build the interface:
+Requires Python 3.12+, uv, and Node.js with the vp CLI to build the interface:
 
 ```bash
 uv sync --locked --no-build --python 3.12
@@ -74,7 +84,6 @@ python3 scripts/export_requirements.py
 Use `uv add`/`uv remove` for intentional dependency changes, then export and review both locks. Normal startup uses `--locked` and never upgrades packages. Metadata stays at the current `VERSION`; releases must update both version fields. Pip/Docker still require matching hashes and binary wheels; do not disable these checks.
 
 Docker's build frontend, Node and Python images are pinned by multi-platform digest. When refreshing them, retain `linux/amd64` and `linux/arm64` support and verify the build. Locks prevent drift, not future vulnerabilities; security updates still require reviewed refreshes.
-
 
 ## CLI login
 

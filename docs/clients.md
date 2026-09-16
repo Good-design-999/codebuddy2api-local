@@ -24,7 +24,7 @@ Use an ID from this response or the WebUI; accounts do not necessarily support t
 
 ## Codex CLI
 
-Merge this into `~/.codex/config.toml`; do not overwrite existing configuration:
+Merge this into `~/.codex/config.toml`; do not overwrite existing configuration. A ready-to-copy variant is kept at [`examples/codex-codebuddy.example.toml`](../examples/codex-codebuddy.example.toml):
 
 ```toml
 [model_providers.workbuddy]
@@ -64,4 +64,11 @@ Use the common Base URL, API key and model ID with Cherry Studio, ZCode, LobeCha
 
 The generation endpoints are `POST /v1/chat/completions`, `POST /v1/responses` and `POST /v1/messages`. Set `stream: false` explicitly for JSON responses or `stream: true` for SSE.
 
-`developer` messages are normalized to `system` without mutating the caller's original payload. Named function choices are sent upstream as `required` with only that function available; invalid names are rejected locally.
+## Protocol behavior worth knowing
+
+- `developer` messages are normalized to `system` without mutating the caller's original payload.
+- Named function choices are sent upstream as `required` with only that function available; invalid names are rejected locally.
+- Errors follow the client protocol's own shape (OpenAI `error` object vs Anthropic `{"type":"error"}`), and status codes are preserved.
+- `POST /v1/messages/count_tokens` returns a character-based heuristic estimate for budgeting, not an exact count.
+
+See the [advanced reference](advanced.md#request-boundaries) for the full request-processing rules.

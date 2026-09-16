@@ -123,7 +123,7 @@ class Management:
         facts = {}
         for account in (self.CONFIG.get("account_catalogs") or {}).values():
             for item in self.gateway._usable_models(
-                    self.gateway._account_scope(account, "serves") or []):
+                    self.gateway._effective_account_scope(account, "serves") or []):
                 source = item["id"]
                 row = facts.setdefault(source, {"id": source, "credits": None, "credits_by_profile": {}})
                 price = self.gateway._multiplier_value(item.get("credits"))
@@ -139,7 +139,11 @@ class Management:
             rule = model_policy.rule_for(self.CONFIG, source)
             preview = self.admin_model_preview(source, rule)
             target = facts.get(rule["upstream_id"], row)
-            result.append({**target, **rule, "id": source, "available_credentials": len(preview["candidates"]),
+            metadata = self.gateway.model_capabilities.route_metadata(
+                self.gateway, rule["upstream_id"], rule=rule, include_disabled=True)
+            prices = self.gateway.model_capabilities.declaration_prices(self.gateway, metadata)
+            result.append({**target, **metadata, **prices, **rule, "id": source,
+                           "available_credentials": len(preview["candidates"]),
                            "available": bool(preview["candidates"])})
         return sorted(result, key=lambda row: row["id"])
 
@@ -168,7 +172,7 @@ class Management:
                     reason = "后端模型暂时不可用"
                 elif not pool._eligible(entry, upstream, rule=rule):
                     account = (self.CONFIG.get("account_catalogs") or {}).get(identity, {})
-                    models = self.gateway._account_scope(account, "serves")
+                    models = self.gateway._effective_account_scope(account, "serves", model_id=self.gateway._upstream_model(upstream, profile))
                     if (self.CONFIG.get("account_catalogs") is not None or self.CONFIG.get("model_cache") is not None) and (
                             models is None or account.get("profile") != profile):
                         reason = "目录尚未就绪"
@@ -181,7 +185,9 @@ class Management:
                     rejected.append({**item, "reason": reason})
                 else:
                     accepted.append(item)
-        return {"candidates": accepted, "excluded": rejected}
+        return {"candidates": accepted, "excluded": rejected,
+                **self.gateway.model_capabilities.route_metadata(
+                    self.gateway, upstream, rule=rule, include_disabled=True)}
 
     def admin_apply_settings(self, values):
         restart = {"host", "port", "auth_file", "auth_dir", "import_dir", "skip_check", "log_db"}

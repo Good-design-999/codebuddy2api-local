@@ -24,9 +24,12 @@ Management is locked without a key. After changing it, sign in again and restart
   - Reward claims and departures are durably reserved before sending. Stale or failed readbacks block repeat writes across restarts, without time-based expiry; only a reconciled state or definite pre-send cancellation/rejection releases them. Keep `control.sqlite3`. The console shows pending operations and leaves unknown rewards unset.
   - Saving a preference does not claim immediately; it affects subsequent maintenance and cannot retract sent requests. The console shows last results, partial completion and uncertainty, retaining history on failure.
 - **Models:** add independent mappings with public/upstream IDs and local enablement. Choose either specific accounts or a region with an optional product filter; switching modes clears the opposite binding. Unavailable candidates never cause out-of-scope fallback.
+  - “Model details” shows descriptions, capability states, token limits, reasoning options and safe raw metadata by product; differences remain separate. Declarations are read-only and do not guarantee native or measured support. Route previews use the draft binding scope.
+  - International catalogs are shared and deduplicated. Inherited entries show “Shared catalog source” with expandable safe originals; native declarations and shared references remain distinguishable.
 - **Logs:** filter requests and inspect failed attempts. Closing details or switching log type cancels pending detail loads. Clearing details keeps historical statistics.
 - **Settings:** edit unlocked options; hot changes apply immediately, while restart-marked settings require a manual restart. Change locked options in the startup configuration; see [configuration precedence](advanced.md).
   - “Keep tool descriptions” is off by default and works across all three protocols, independently of prompt compaction; see [tool metadata retention](advanced.md#tool-metadata-retention) for configuration and limits.
+  - “Model capability preflight” defaults to on. Disabling it affects new requests only, not metadata display, international image-run merging or existing security limits; see [model declarations](advanced.md#model-declarations-and-image-compatibility).
 
 Clearing **all logs and statistics** is irreversible. Enter the confirmation text shown in the dialog and re-enter the current API key. This does not delete credentials or gateway settings.
 

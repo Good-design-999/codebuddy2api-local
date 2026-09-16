@@ -35,6 +35,7 @@ SCHEMA = {
     "credit_price_usd": _item(0.03, "number", "国际积分单价", minimum=0),
     "model_catalog_ttl": _item(21600, "integer", "模型目录缓存秒数", minimum=0, maximum=31536000),
     "model_guard": _item(True, "boolean", "表外模型拦截"),
+    "model_capability_guard": _item(True, "boolean", "模型能力预检", env="CODEBUDDY2API_MODEL_CAPABILITY_GUARD"),
     "max_images": _item(16, "integer", "单请求图片上限", env="CODEBUDDY2API_MAX_IMAGES", minimum=0, maximum=10000),
     "image_policy": _item("truncate", "string", "超额图片策略", env="CODEBUDDY2API_IMAGE_POLICY", choices=["truncate", "error"]),
     "max_request_bytes": _item(32 * 1024 * 1024, "integer", "请求字节上限", env="CODEBUDDY2API_MAX_REQUEST_BYTES", minimum=1, maximum=1024**3),

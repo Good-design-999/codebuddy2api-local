@@ -62,6 +62,9 @@ from app.upstream_io import (ChatSSEAccumulator, UpstreamHTTPError, UpstreamResp
 from app.inference_resources import (AccountCapacity, InferenceResourcesMiddleware, inference_lifespan,
                                      request_resources, release_credential)
 from app.request_context import SessionIdentifierError, current_context
+from app import model_capabilities
+from app.message_normalization import merge_intl_user_images
+from app.model_catalog_view import INTERNATIONAL as SHARED_INTL_PROFILES, share_models
 from app.inference_auth import require_api_key
 from app.content_filter import ContentFilterDetector, is_filter_error
 from app.request_limits import ImageLimitError, apply_image_policy
@@ -721,7 +724,7 @@ class CredentialPool:
             if identity != entry.get("account_key"):
                 return False
             account = (CONFIG.get("account_catalogs") or {}).get(identity) or {}
-            models = _account_scope(account, "serves")
+            models = _effective_account_scope(account, "serves", model_id=_upstream_model(model, profile))
             if account.get("profile") != profile or models is None:
                 return False
             usable = _usable_models(models)
@@ -750,8 +753,8 @@ class CredentialPool:
             account = (accounts or {}).get(entry.get("account_key")) or {}
             if account.get("profile") != profile:
                 return False
-            return _model_free(_account_scope(account, "serves"), model, profile)
-        return _model_free(_models_for_profile(profile), model, profile)
+            return _model_free(_effective_account_scope(account, "serves", model_id=_upstream_model(model, profile)), model, profile)
+        return _model_free(_models_for_profile(profile, model_id=_upstream_model(model, profile)), model, profile)
 
     @classmethod
     def _entry_endpoint(cls, e: dict) -> str | None:
@@ -759,11 +762,20 @@ class CredentialPool:
         profile = cls._entry_profile(e)
         return PROFILE_ENDPOINTS.get(profile) if profile else None
 
+    @classmethod
+    def _model_block_key(cls, entry):
+        endpoint = cls._entry_endpoint(entry)
+        if endpoint and cls._entry_profile(entry) in SHARED_INTL_PROFILES:
+            identity = entry.get("account_key") or hashlib.sha256(str(entry.get("id", "")).encode()).hexdigest()
+            return f"{endpoint}#account:{identity}"
+        return endpoint
+
+
     def _model_servable(self, e: dict, model: str | None) -> bool:
         """Check backend/model backoff, skipping the check when no model is supplied."""
         if not model:
             return True
-        endpoint = self._entry_endpoint(e)
+        endpoint = self._model_block_key(e)
         if not endpoint:
             return True
         return time.time() >= self._blocks.until(endpoint, _block_model(model))
@@ -809,7 +821,7 @@ class CredentialPool:
 
 
     def pick(self, skey: str | None, model: str | None = None, *, region=None,
-             tried=(), with_capacity=False) -> CredentialManager | None:
+             tried=(), with_capacity=False, requirements=None) -> CredentialManager | None:
         """Select a healthy sticky or round-robin credential, preferring eligible zero-rate accounts."""
         self._rescan()  # Reload and prune acquire their own locks.
         with self._lock:
@@ -819,6 +831,14 @@ class CredentialPool:
                 if skey:
                     self._sticky.pop(skey, None)
                 return None
+            if requirements is not None:
+                free = self._model_free(candidates[0], model)
+                checked = [(entry, requirements.violations(
+                    model_capabilities.entry_model(sys.modules[__name__], entry, model)))
+                    for entry in candidates if self._model_free(entry, model) == free]
+                candidates = [entry for entry, failures in checked if not failures]
+                if not candidates:
+                    raise model_capabilities.capability_error([failure for _, failures in checked for failure in failures])
             limit = CONFIG.get("max_inflight_per_account", 0)
             if with_capacity and limit:
                 free = self._model_free(candidates[0], model)
@@ -844,11 +864,12 @@ class CredentialPool:
             return e["cm"]
 
     def headers_for(self, skey: str | None, model: str | None = None, *, region=None,
-                    with_generation=False, tried=(), with_capacity=False):
+                    with_generation=False, tried=(), with_capacity=False, requirements=None):
         """Recheck identity and atomically reserve account capacity before sending."""
         capacity_race = False
+        capability_failures = []
         for _ in range(max(1, len(self._entries))):
-            cm = self.pick(skey, model, region=region, tried=tried, with_capacity=with_capacity)
+            cm = self.pick(skey, model, region=region, tried=tried, with_capacity=with_capacity, requirements=requirements)
             if cm is None:
                 return None
             reason = None
@@ -867,6 +888,11 @@ class CredentialPool:
                 entry = next((entry for entry in self._entries if entry["cm"] is cm), None)
                 if (entry is not None and cm._generation == generation and self._healthy(entry)
                         and self._eligible(entry, model, region=region, profile=profile) and self._model_healthy(entry, model)):
+                    if requirements is not None:
+                        failures = requirements.violations(model_capabilities.entry_model(sys.modules[__name__], entry, model))
+                        if failures:
+                            capability_failures.extend(failures)
+                            continue
                     if with_capacity:
                         lease = self._capacity.acquire(self._capacity_key(entry),
                             CONFIG.get("max_inflight_per_account", 0), cm, generation)
@@ -877,6 +903,8 @@ class CredentialPool:
                     return ((cm, generation) if with_generation else cm), headers
         if capacity_race:
             raise self._capacity_error()
+        if capability_failures:
+            raise model_capabilities.capability_error(capability_failures)
         return None
 
     @staticmethod
@@ -910,7 +938,7 @@ class CredentialPool:
             return
         not_servable = _parse_not_servable(raw, status) if model else None
         if not_servable:
-            self.note_not_servable(cm, model, code=not_servable[0], msg=not_servable[1])
+            self.note_not_servable(cm, model, code=not_servable[0], msg=not_servable[1], generation=generation)
             return
         if status != 429 or not model:
             return
@@ -950,15 +978,18 @@ class CredentialPool:
                 return None
             return min(untils)
 
-    def note_not_servable(self, cm, model: str, code: str = "", msg: str = "") -> float:
-        """Block an unsupported backend/model pair and return its retry time."""
+    def note_not_servable(self, cm, model: str, code: str = "", msg: str = "", *, generation=None) -> float:
+        """Isolate international model rejection by account; retain domestic backend backoff."""
         if not model:
             return 0.0
-        entry = next((e for e in self._entries if e["cm"] is cm), None)
-        endpoint = self._entry_endpoint(entry) if entry else None
-        if not endpoint:
-            return 0.0
-        row = self._blocks.note(endpoint, _block_model(model), code=code, msg=msg)
+        with self._lock, (cm._lock if generation is not None else nullcontext()):
+            if not self._lease_matches(cm, generation):
+                return 0.0
+            entry = next((e for e in self._entries if e["cm"] is cm), None)
+            endpoint = self._model_block_key(entry) if entry else None
+            if not endpoint:
+                return 0.0
+            row = self._blocks.note(endpoint, _block_model(model), code=code, msg=msg)
         until = float(row.get("until") or 0.0)
         _log(f"[block] 模型 {model} @{endpoint} 官方回 {code}，"
              f"{time.strftime('%m-%d %H:%M', time.localtime(until))} 前不再派发 "
@@ -970,7 +1001,7 @@ class CredentialPool:
         if not model:
             return False
         entry = next((e for e in self._entries if e["cm"] is cm), None)
-        endpoint = self._entry_endpoint(entry) if entry else None
+        endpoint = self._model_block_key(entry) if entry else None
         return bool(endpoint) and self._blocks.clear(endpoint, _block_model(model))
 
     def model_block_until(self, model: str | None, *, region=None) -> float | None:
@@ -981,10 +1012,11 @@ class CredentialPool:
         with self._lock:
             candidates = [e for e in self._entries
                           if self._healthy(e) and (region is None
-                                                   or _in_region(self._entry_profile(e), region))]
-            endpoints = {self._entry_endpoint(e) for e in candidates}
+                                                   or _in_region(self._entry_profile(e), region))
+                          and model_policy.route_allowed(CONFIG, e, model)]
+            endpoints = {self._model_block_key(e) for e in candidates}
             # Unknown catalogs remain potential sources, but cannot authorize dispatch.
-            capable = {self._entry_endpoint(e) for e in candidates
+            capable = {self._model_block_key(e) for e in candidates
                        if (profile := self._entry_profile(e))
                        and profile in _model_profiles(model, profile_region(profile))}
             accounts = CONFIG.get("account_catalogs")
@@ -997,7 +1029,7 @@ class CredentialPool:
                     return (account.get("profile") != profile
                             or _account_scope(account, "serves") is None)
                 return _catalog_for(profile, "serves") is None
-            unknown = {self._entry_endpoint(e) for e in candidates if catalog_unknown(e)}
+            unknown = {self._model_block_key(e) for e in candidates if catalog_unknown(e)}
         endpoints.discard(None)
         endpoints &= capable | unknown
         if not endpoints:
@@ -1487,6 +1519,7 @@ CONFIG: dict = {"api_key": "", "cred": None, "log_path": None, "ledger": None,
                 "max_collect_bytes": 8 * 1024 * 1024, "max_concurrent": 64,
                 "upstream_keepalive": False, "max_inflight_per_account": 0,
                 "request_context_mode": "legacy",
+                "model_capability_guard": True,
                 "failover_max": 0,     # Credential failovers allowed before the first response byte
                 "retry_write_timeout": False,  # Opt-in replay after incomplete writes
                 "usage_daily": None,     # Usage aggregated by date and model
@@ -1571,7 +1604,7 @@ def _check_admin_auth(authorization: Optional[str], x_api_key: Optional[str]):
     _check_auth(authorization, x_api_key)
 
 
-def _cred_for(payload: dict, model: str | None = None, *, region=None, tried=()):
+def _cred_for(payload: dict, model: str | None = None, *, region=None, tried=(), requirements=None):
     """Select a fresh credential lease and headers, excluding tried accounts; report unavailable capacity."""
     context = current_context()
     raw_key = context.session_key if context is not None and context.scoped else session_key(payload)
@@ -1581,7 +1614,7 @@ def _cred_for(payload: dict, model: str | None = None, *, region=None, tried=())
     if pool is not None:
         resources = request_resources.get()
         picked = pool.headers_for(skey, model, region=region, with_generation=True, tried=tried,
-                                  with_capacity=resources is not None)
+                                  with_capacity=resources is not None, requirements=requirements)
         if picked is None:
             until = pool.model_cooldown_until(model, region=region)
             if until:
@@ -1625,19 +1658,41 @@ def _cred_for(payload: dict, model: str | None = None, *, region=None, tried=())
 
 
 def _route_chat(payload, body, rid, *, tried=()):
-    """Resolve the account's backend, region and model without changing client URLs."""
-    cred, headers = _cred_for(payload, body.get("model"), tried=tried)
-    profile = profile_for_headers(headers)
-    routed_model = _upstream_model(body.get("model"), profile)
-    if routed_model != body.get("model"):
-        body = {**body, "model": routed_model}
-        _guard_request_size(body)
-    url = chat_url_for_headers(headers)
-    observe_route(public_model=payload.get("model", "auto"), upstream_model=routed_model,
-                  profile=profile, credential=account_key(profile, headers.get("X-User-Id"),
-                                                         headers.get("X-Enterprise-Id")))
-    _log(f"[{rid}] ROUTE | region={profile_region(profile)} | profile={profile} | model={routed_model} | url={url}")
-    return body, cred, headers, url
+    """Validate account capabilities and derive each routed body from canonical input."""
+    context = current_context()
+    enabled = context.capability_guard if context is not None else CONFIG.get("model_capability_guard", True)
+    cred = None
+    try:
+        requirements = (model_capabilities.Requirements.from_request(
+            body, payload, context.protocol if context is not None else "chat") if enabled else None)
+        cred, headers = _cred_for(payload, body.get("model"), tried=tried, requirements=requirements)
+        profile = profile_for_headers(headers)
+        routed_model = _upstream_model(body.get("model"), profile)
+        if requirements is not None and CONFIG.get("cred_pool") is None:
+            entry = {"profile": profile, "account_key": account_key(
+                profile, headers.get("X-User-Id"), headers.get("X-Enterprise-Id"))}
+            failures = requirements.violations(model_capabilities.entry_model(sys.modules[__name__], entry, body.get("model")))
+            if failures:
+                raise model_capabilities.capability_error(failures)
+        canonical = body
+        if routed_model != body.get("model"):
+            body = {**body, "model": routed_model}
+        body, merged_runs, merged_messages = merge_intl_user_images(body, profile)
+        if body is not canonical:
+            _guard_request_size(body)
+        if merged_runs:
+            observe_attempt("intl_image_merge", merged_runs=merged_runs, merged_messages=merged_messages)
+        url = chat_url_for_headers(headers)
+        observe_route(public_model=payload.get("model", "auto"), upstream_model=routed_model,
+                      profile=profile, credential=account_key(profile, headers.get("X-User-Id"),
+                                                             headers.get("X-Enterprise-Id")))
+        _log(f"[{rid}] ROUTE | region={profile_region(profile)} | profile={profile} | model={routed_model} | url={url}")
+        return body, cred, headers, url
+    except HTTPException as error:
+        release_credential(cred)
+        detail = error.detail.get("error", {}) if isinstance(error.detail, dict) else {}
+        observe_attempt("request_preflight_rejected", code=detail.get("code"))
+        raise
 
 
 def _note_cred_model_ok(cred, model: str | None) -> None:
@@ -2023,7 +2078,7 @@ def invalidate_model_table() -> None:
     _model_table_cache = {}
 
 
-def _catalog_for(profile: str, scope: str = "models"):
+def _catalog_for(profile: str, scope: str = "models", *, model_id=None):
     """Return a profile catalog within the requested account scope."""
     accounts = CONFIG.get("account_catalogs")
     if accounts is not None or CONFIG.get("model_cache") is not None:
@@ -2033,7 +2088,7 @@ def _catalog_for(profile: str, scope: str = "models"):
             if entry.get("profile") != profile:
                 continue
             account = (accounts or {}).get(entry.get("account_key")) or {}
-            items = _account_scope(account, scope)
+            items = _effective_account_scope(account, scope, model_id=model_id)
             if account.get("profile") == profile and items is not None:
                 if models is None:
                     models = []
@@ -2079,14 +2134,37 @@ def _account_scope(account: dict, scope: str = "models") -> list[dict] | None:
     return picker + [item for item in account.get("serves") or [] if item.get("id") not in seen]
 
 
-def _models_for_profile(profile: str, configured=None, *, scope: str = "models") -> list[dict]:
-    models = _catalog_for(profile, scope)
+def _shared_catalog_sources(scope="models"):
+    accounts, pool = CONFIG.get("account_catalogs"), CONFIG.get("cred_pool")
+    if accounts is not None or CONFIG.get("model_cache") is not None:
+        return [(entry["profile"], _account_scope(account, scope))
+                for entry in (pool.entries() if pool is not None else [])
+                if entry.get("profile") in SHARED_INTL_PROFILES and model_policy.credential_enabled(CONFIG, entry)
+                and (account := (accounts or {}).get(entry.get("account_key")))
+                and account.get("profile") == entry["profile"] and account.get("models") is not None]
+    configured = _configured_profiles(None)
+    return [(profile, _catalog_for(profile, scope)) for profile in sorted(configured & SHARED_INTL_PROFILES)]
+
+
+def _effective_account_scope(account, scope="models", *, model_id=None):
+    native = _account_scope(account, scope)
+    profile = account.get("profile")
+    if profile not in SHARED_INTL_PROFILES or native is None:
+        return native
+    return share_models(native, profile, _shared_catalog_sources(scope), model_id=model_id)
+
+
+
+def _models_for_profile(profile: str, configured=None, *, scope: str = "models", model_id=None) -> list[dict]:
+    models = _catalog_for(profile, scope, model_id=model_id)
     if models is None:
         # Static fallback is limited to legacy domestic CLI deployments.
         configured = _configured_profiles(profile_region(profile)) if configured is None else configured
         return ([{"id": name, "supportsToolCall": True} for name in DEFAULT_MODELS]
                 if CONFIG.get("model_cache") is None and CONFIG.get("account_catalogs") is None
                 and profile == "cn-cli" and configured <= {"cn-cli"} else [])
+    if profile in SHARED_INTL_PROFILES and CONFIG.get("account_catalogs") is None and CONFIG.get("model_cache") is None:
+        models = share_models(models, profile, _shared_catalog_sources(scope), model_id=model_id)
     return _usable_models(models)
 
 
@@ -2131,7 +2209,7 @@ def _model_profiles(model: str | None, region: str | None = None, configured=Non
         return profiles
     supported = {profile for profile in profiles
                  if any(item["id"] == _upstream_model(model, profile)
-                        for item in _models_for_profile(profile, configured, scope="serves"))}
+                        for item in _models_for_profile(profile, configured, scope="serves", model_id=_upstream_model(model, profile)))}
     if model == "auto" and region == "cn":
         # WorkBuddy uses its advertised Auto; legacy CLI defaults remain separate.
         if "cn-work" in configured and "cn-work" in supported:
@@ -2191,7 +2269,7 @@ def current_models(region: str | None = None) -> list[str]:
                 account = accounts.get(entry.get("account_key")) or {}
                 if account.get("profile") != profile:
                     continue
-                models = _usable_models(_account_scope(account, "serves"))
+                models = _usable_models(_effective_account_scope(account, "serves"))
                 if zero:
                     models = [model for model in models if _free_multiplier(model.get("credits"))]
                 out.extend(model["id"] for model in models)
@@ -2220,10 +2298,11 @@ def current_model_details(region: str | None = None) -> list[dict]:
     if pool is not None:
         pool._rescan()
     details: dict[str, dict] = {}
+    declarations = {}
     for name in current_models(region):
         details[name] = {"id": name, "credits": None, "credits_by_profile": {}}
     if pool is None:
-        return list(details.values())
+        return [{**item, **model_capabilities.describe_models(())} for item in details.values()]
     with pool._lock:
         def record(profile: str, item: dict, *, zero: bool) -> None:
             name = item.get("id")
@@ -2231,6 +2310,7 @@ def current_model_details(region: str | None = None) -> list[dict]:
                 return
             if zero and not _free_multiplier(item.get("credits")):
                 return  # Empty accounts cannot supply paid model rates.
+            declarations.setdefault(name, []).append((profile, item))
             value = _multiplier_value(item.get("credits"))
             if value is None:
                 return
@@ -2252,7 +2332,7 @@ def current_model_details(region: str | None = None) -> list[dict]:
                 account = accounts.get(entry.get("account_key")) or {}
                 if account.get("profile") != profile:
                     continue
-                for item in _usable_models(_account_scope(account, "serves")):
+                for item in _usable_models(_effective_account_scope(account, "serves")):
                     record(profile, item, zero=zero)
         else:
             configured = _configured_profiles(region)
@@ -2263,7 +2343,7 @@ def current_model_details(region: str | None = None) -> list[dict]:
                     continue
                 for item in _models_for_profile(profile, configured):
                     record(profile, item, zero=zero_only)
-    return list(details.values())
+    return [{**item, **model_capabilities.describe_models(declarations.get(item["id"], []))} for item in details.values()]
 
 
 def _client_wants_stream(payload: dict) -> bool:
@@ -2406,7 +2486,8 @@ def list_models(authorization: Optional[str] = Header(default=None),
                 x_api_key: Optional[str] = Header(default=None, alias="X-Api-Key")):
     _check_auth(authorization, x_api_key)
     data = [{"id": item["id"], "object": "model", "created": 1700000000, "owned_by": "codebuddy",
-             "credits": item["credits"], "credits_by_profile": item["credits_by_profile"]}
+             "credits": item["credits"], "credits_by_profile": item["credits_by_profile"],
+             **{key: item[key] for key in ("capabilities", "limits", "metadata_by_profile") if key in item}}
             for item in model_policy.public_details(sys.modules[__name__])]
     return {"object": "list", "data": data}
 
@@ -3487,6 +3568,9 @@ def main():
     ap.add_argument("--request-context-mode", choices=("legacy", "scoped"),
                     default=os.environ.get("CODEBUDDY2API_REQUEST_CONTEXT_MODE", "legacy"),
                     help="请求上下文：legacy 保持旧会话头，scoped 启用显式会话与逐尝试追踪；默认 legacy")
+    ap.add_argument("--model-capability-guard", type=_boolean_arg, nargs="?", const=True,
+                    default=os.environ.get("CODEBUDDY2API_MODEL_CAPABILITY_GUARD", "true"),
+                    help="按账号模型声明预检图片、工具、思考和输出上限；false 仅关闭新增能力预检")
     ap.add_argument("--log-body-limit", type=_nonnegative_int, metavar="BYTES",
                     default=os.environ.get("CODEBUDDY2API_LOG_BODY_LIMIT", "65536"),
                     help="每条正文日志的预览字节上限，默认 64 KiB；0 只记录摘要")
@@ -3517,7 +3601,7 @@ def main():
     for key in ("max_images", "image_policy", "max_request_bytes", "log_body_limit",
                 "tool_call_max_retry", "max_inbound_bytes", "max_collect_bytes", "max_concurrent",
                 "failover_max", "retry_write_timeout", "upstream_keepalive", "max_inflight_per_account",
-                "request_context_mode"):
+                "request_context_mode", "model_capability_guard"):
         CONFIG[key] = getattr(args, key)
     CONFIG["api_key"] = args.api_key
     CONFIG["desensitize"] = args.desensitize

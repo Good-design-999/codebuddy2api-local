@@ -1339,6 +1339,29 @@ $white: var(--page);
   color: $ink;
   overflow-wrap: anywhere;
 }
+.modelMetadata {
+  padding: 0 22px 18px;
+  min-width: 0;
+}
+.metadataFields {
+  display: grid;
+  grid-template-columns: minmax(95px, 0.8fr) minmax(0, 1.2fr);
+  gap: 9px 16px;
+  margin: 14px 0 0;
+  overflow-wrap: anywhere;
+  dt {
+    color: $muted;
+  }
+  dd {
+    margin: 0;
+    min-width: 0;
+  }
+  .metadataFields {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 3px;
+    margin: 0;
+  }
+}
 .badgeStack {
   display: flex;
   gap: 5px;

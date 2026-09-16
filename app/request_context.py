@@ -63,10 +63,11 @@ class Attempt:
 
 
 class RequestContext:
-    def __init__(self, protocol, mode="legacy", headers=()):
+    def __init__(self, protocol, mode="legacy", headers=(), *, capability_guard=True):
         self.request_id = uuid.uuid4().hex
         self.protocol = protocol
         self.mode = mode
+        self.capability_guard = capability_guard
         self._session_headers = tuple(value.decode("latin-1") for key, value in headers
                                       if key.lower() == b"x-codebuddy-session-id") if self.scoped else ()
         self.session_key = "scoped:v1:temporary:" + self.request_id
@@ -143,7 +144,8 @@ def ensure_context(scope, config=None):
     if _SCOPE_KEY not in scope:
         values = config() if callable(config) else config
         mode = values.get("request_context_mode", "legacy") if isinstance(values, dict) else "legacy"
-        scope[_SCOPE_KEY] = RequestContext(PATHS[scope["path"]], mode, scope.get("headers", ()))
+        guard = values.get("model_capability_guard", True) if isinstance(values, dict) else True
+        scope[_SCOPE_KEY] = RequestContext(PATHS[scope["path"]], mode, scope.get("headers", ()), capability_guard=guard)
     return scope[_SCOPE_KEY]
 
 

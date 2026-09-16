@@ -49,6 +49,45 @@ class ManagedRoutingTests(fixtures.RegionRoutingTests):
                                   known_models=[item["id"] for item in self.management.admin_model_inventory()])
         return rule
 
+    def test_model_metadata_respects_alias_and_draft_scope_without_exposing_identity(self):
+        tables = {profile: [{**fixtures.model('shared-model', 'x0.00'), 'supportsImages': profile == 'cn-cli',
+                            'descriptionZh': 'safe-' + profile, 'accessToken': 'metadata-secret-canary',
+                            'uid': 'private-account'}] for profile in fixtures.PROFILES}
+        self.account_catalogs(tables)
+        self.policy(public_id='public-capabilities', profile='intl-work')
+        published = next(m for m in self.client.get('/v1/models').json()['data'] if m['id'] == 'public-capabilities')
+        self.assertEqual(set(published['metadata_by_profile']), {'intl-work'})
+        self.assertEqual(published['capabilities']['images'], 'unsupported')
+        self.assertNotIn('metadata-secret-canary', json.dumps(published))
+        self.assertNotIn('private-account', json.dumps(published))
+        response = self.client.post('/admin/models/shared-model/preview', json={
+            'public_id': 'public-capabilities', 'upstream_id': 'shared-model', 'enabled': True,
+            'keep_original': False, 'region': None, 'profile': 'cn-cli', 'credential_ids': []})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(set(response.json()['metadata_by_profile']), {'cn-cli'})
+        self.assertEqual(response.json()['capabilities']['images'], 'supported')
+        self.policy(public_id='public-capabilities', profile='intl-work', enabled=False)
+        rows = self.client.get('/admin/models').json()['models']
+        managed = next(row for row in rows if row['id'] == 'shared-model')
+        self.assertFalse(managed['enabled'])
+        self.assertEqual(set(managed['metadata_by_profile']), {'intl-work'})
+        self.assertNotIn('metadata-secret-canary', json.dumps(managed))
+
+    def test_managed_capability_guard_hot_toggle_does_not_remove_metadata(self):
+        self.configure(profiles=('intl-work',))
+        self.account_catalogs({'intl-work': [{**fixtures.model('shared-model', 'x0.00'), 'supportsImages': False}]})
+        body = self.payload(text=[{'type': 'image_url', 'image_url': {'url': 'https://example.invalid/a.png'}}])
+        response = self.client.post('/v1/chat/completions', json=body)
+        self.assertEqual(response.status_code, 400, response.text)
+        response = self.client.patch('/admin/settings', json={'revision': self.control.snapshot()['revision'],
+                                                            'values': {'model_capability_guard': False}})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.post_ok('chat/completions', body, {'intl-work'})
+        data = self.client.get('/admin/models').json()
+        self.assertFalse(data['model_capability_guard'])
+        self.assertEqual(data['models'][0]['capabilities']['images'], 'unsupported')
+
+
     def test_managed_alias_all_protocols_strict_binding_and_response_names(self):
         identity = self.entries["intl-work"]["account_key"]
         self.policy(public_id="garden-fast", credential_ids=[identity])

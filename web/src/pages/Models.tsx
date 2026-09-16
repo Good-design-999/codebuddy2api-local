@@ -24,6 +24,7 @@ import {
   ResourceState,
   profileLabel,
 } from "../components";
+import { CapabilityBadges, ModelMetadata, modelDisplayName } from "../modelMetadata";
 import s from "../ui.module.scss";
 export const profiles = ["cn-cli", "cn-work", "intl-cli", "intl-work"];
 const validId = (id: string) => /^[A-Za-z0-9_.:/@-]{1,160}$/.test(id) && ![".", ".."].includes(id);
@@ -52,7 +53,10 @@ function bindingMode(rule: ModelRule): Mode {
   if (rule.credential_ids.length) return rule.region || rule.profile ? "legacy" : "accounts";
   return rule.region || rule.profile ? "region" : "auto";
 }
-type Preview = { candidates: RecordValue[]; excluded: RecordValue[] };
+type Preview = { candidates: RecordValue[]; excluded: RecordValue[] } & Pick<
+  ModelRule,
+  "capabilities" | "limits" | "metadata_by_profile"
+>;
 function RoutePreview({ preview }: { preview: Preview }) {
   return (
     <Panel
@@ -173,7 +177,13 @@ export function ModelEditor({
           onClose();
         } else {
           const data = object(response.data);
-          setPreview({ candidates: list(data.candidates), excluded: list(data.excluded) });
+          setPreview({
+            candidates: list(data.candidates),
+            excluded: list(data.excluded),
+            capabilities: data.capabilities,
+            limits: data.limits,
+            metadata_by_profile: data.metadata_by_profile,
+          });
         }
       })
       .catch((err: unknown) => {
@@ -376,7 +386,12 @@ export function ModelEditor({
           </button>
         </div>
       </form>
-      {preview && <RoutePreview preview={preview} />}
+      {preview && (
+        <>
+          <RoutePreview preview={preview} />
+          <ModelMetadata model={preview} />
+        </>
+      )}
     </Drawer>
   );
 }
@@ -394,13 +409,17 @@ export function Models() {
   const resource = useResource("/models", modelResponse);
   const credentials = useResource("/credentials", credentialResponse);
   const [query, setQuery] = useState("");
+  const [detailsId, setDetailsId] = useState<string | null>(null);
+  const detailed = resource.data?.models.find((model) => model.id === detailsId);
   const [editing, setEditing] = useState<ModelRule | null>(null);
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<ModelRule | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const rows = resource.data?.models.filter((m) =>
-    `${m.upstream_id ?? m.id} ${m.public_id}`.toLowerCase().includes(query.toLowerCase()),
+    `${m.upstream_id ?? m.id} ${m.public_id} ${modelDisplayName(m)}`
+      .toLowerCase()
+      .includes(query.toLowerCase()),
   );
   return (
     <>
@@ -438,10 +457,18 @@ export function Models() {
         <div className={s.toolbar}>
           <input
             aria-label="搜索模型"
-            placeholder="搜索对外 ID 或上游模型…"
+            placeholder="搜索对外 ID、上游模型或显示名称…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
+          <Badge tone={resource.data?.model_capability_guard === false ? "warn" : "neutral"}>
+            能力预检：
+            {resource.data?.model_capability_guard === undefined
+              ? "未知"
+              : resource.data.model_capability_guard
+                ? "开启"
+                : "关闭"}
+          </Badge>
         </div>
         {rows &&
           (rows.length ? (
@@ -452,6 +479,7 @@ export function Models() {
                     <th>对外模型 / 上游 ID</th>
                     <th>状态</th>
                     <th>目录倍率</th>
+                    <th>能力（上游声明）</th>
                     <th>路由边界</th>
                     <th>操作</th>
                   </tr>
@@ -462,6 +490,7 @@ export function Models() {
                       <td>
                         <strong className={s.modelName}>{m.public_id}</strong>
                         <small className={s.mono}>{m.upstream_id ?? m.id}</small>
+                        {modelDisplayName(m) && <small>{modelDisplayName(m)}</small>}
                         {m.keep_original && <small>同时保留 {m.id}</small>}
                       </td>
                       <td>
@@ -492,6 +521,9 @@ export function Models() {
                         )}
                       </td>
                       <td>
+                        <CapabilityBadges model={m} />
+                      </td>
+                      <td>
                         {m.credential_ids.length
                           ? `${m.credential_ids.length} 个指定账号`
                           : m.region
@@ -508,6 +540,7 @@ export function Models() {
                       </td>
                       <td>
                         <div className={s.rowActions}>
+                          <button onClick={() => setDetailsId(m.id)}>模型详情</button>
                           <button onClick={() => setEditing(m)}>编辑规则</button>
                           {m.custom && (
                             <button
@@ -533,6 +566,13 @@ export function Models() {
             </Empty>
           ))}
       </Panel>
+      <DrawerPresence>
+        {detailed && (
+          <Drawer title={`模型详情 · ${detailed.public_id}`} onClose={() => setDetailsId(null)}>
+            <ModelMetadata model={detailed} />
+          </Drawer>
+        )}
+      </DrawerPresence>
       <DrawerPresence>
         {(editing || creating) && resource.data && (
           <ModelEditor

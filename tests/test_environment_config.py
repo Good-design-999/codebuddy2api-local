@@ -118,6 +118,24 @@ class EnvironmentConfigTests(unittest.TestCase):
                 self.start(env)
 
 
+    def test_capability_guard_defaults_precedence_and_validation(self):
+        _, items, config = self.start()
+        self.assertTrue(config['model_capability_guard'])
+        self.assertFalse(items['model_capability_guard']['locked'])
+        _, items, config = self.start(saved={'model_capability_guard': False})
+        self.assertFalse(config['model_capability_guard'])
+        self.assertEqual(items['model_capability_guard']['source'], 'management')
+        _, items, config = self.start({'CODEBUDDY2API_MODEL_CAPABILITY_GUARD': 'true'})
+        self.assertTrue(config['model_capability_guard'])
+        self.assertTrue(items['model_capability_guard']['locked'])
+        _, items, config = self.start({'CODEBUDDY2API_MODEL_CAPABILITY_GUARD': 'invalid'},
+                                      cli=('--model-capability-guard=false',))
+        self.assertFalse(config['model_capability_guard'])
+        self.assertEqual(items['model_capability_guard']['source'], 'cli')
+        with self.assertRaises(SystemExit):
+            self.start({'CODEBUDDY2API_MODEL_CAPABILITY_GUARD': 'invalid'})
+
+
     def test_request_context_mode_precedence_and_validation(self):
         _, items, config = self.start(saved={'request_context_mode': 'scoped'})
         self.assertEqual(config['request_context_mode'], 'scoped')
@@ -167,6 +185,7 @@ class EnvironmentConfigTests(unittest.TestCase):
                   'CODEBUDDY2API_FAILOVER_MAX': '1', 'CODEBUDDY2API_RETRY_WRITE_TIMEOUT': 'true',
                   'CODEBUDDY2API_UPSTREAM_KEEPALIVE': 'true', 'CODEBUDDY2API_MAX_INFLIGHT_PER_ACCOUNT': '2',
                   'CODEBUDDY2API_REQUEST_CONTEXT_MODE': 'scoped',
+                  'CODEBUDDY2API_MODEL_CAPABILITY_GUARD': 'false',
                   'CODEBUDDY2API_KEEP_TOOL_METADATA': 'false', 'CODEBUDDY_IMPORT_DIR': '/data/auth/incoming'}
         service = self.compose(values)
         port = service['ports'][0]
@@ -181,7 +200,7 @@ class EnvironmentConfigTests(unittest.TestCase):
         service = self.compose({})
         for name in ('CODEBUDDY2API_KEEP_TOOL_METADATA', 'CODEBUDDY2API_FAILOVER_MAX', 'CODEBUDDY2API_RETRY_WRITE_TIMEOUT',
                      'CODEBUDDY2API_UPSTREAM_KEEPALIVE', 'CODEBUDDY2API_MAX_INFLIGHT_PER_ACCOUNT',
-                     'CODEBUDDY2API_REQUEST_CONTEXT_MODE'):
+                     'CODEBUDDY2API_REQUEST_CONTEXT_MODE', 'CODEBUDDY2API_MODEL_CAPABILITY_GUARD'):
             self.assertIsNone(service['environment'].get(name))
         self.assertEqual(service['ports'][0]['host_ip'], '127.0.0.1')
         self.assertEqual(service['environment']['CODEBUDDY_IMPORT_DIR'], '/data/auth/imports')

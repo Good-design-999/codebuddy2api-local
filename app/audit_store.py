@@ -53,7 +53,7 @@ def safe_attempt(value: Any) -> dict:
         if clean is not None:
             result[key] = clean
     for key in ("status_code", "duration_ms", "attempt", "retry_after", "max_attempts", "total_tokens",
-                "attempt_index", "dropped"):
+                "attempt_index", "dropped", "merged_runs", "merged_messages"):
         clean = number(value.get(key))
         if clean is not None:
             result[key] = clean

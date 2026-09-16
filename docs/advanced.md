@@ -26,6 +26,7 @@ Compose explicitly passes some environment variables and CLI flags, so deleting 
 | `--usd-rate` | `7.15` | CNY per USD for billing conversion |
 | `--model-catalog-ttl` | `21600` | Model catalog cache TTL, seconds |
 | `--no-model-guard` | off | Disable the out-of-catalog guard; passthrough is limited to one product profile and still respects disabling, bindings and catalog readiness |
+| `--model-capability-guard [true/false]` | `true` | Preflight declared image, tool, reasoning and mapped output limits; changes affect new requests |
 | `--max-images` | `16` | Total images per request; `0` permits no images |
 | `--image-policy` | `truncate` | Keep newest images; `error` rejects excess images with 413 |
 | `--tool-call-max-retry` | `3` | Extra generations after malformed tool calls (each consumes credits); `0` disables retries |
@@ -84,6 +85,15 @@ In scoped mode, optionally send `X-Codebuddy-Session-ID`, `metadata.conversation
 Switch back to `legacy` to restore old behavior for new requests; in-flight requests retain their initial mode. Before source downgrade, remove the new startup option and restore a compatible control-store backup without `request_context_mode`.
 
 
+### Model declarations and image compatibility
+
+`/v1/models` retains its existing fields and adds `capabilities`, `limits` and `metadata_by_profile`; management and routing previews expose the same metadata. Capabilities use `supported`, `unsupported`, `mixed` or `unknown`. Limits carry `state` (`known`, `mixed`, `unknown`) and `value`; only unanimous known limits have a numeric value. Per-profile arrays preserve distinct account declarations without identities. Safe descriptions, capabilities, windows, reasoning options, related models and parameter suggestions are allowlisted; credentials, internal configuration and authenticated URLs are excluded. These are upstream declarations, not native-model or measured guarantees; suggestions do not override requests.
+
+`model_capability_guard` defaults to `true`; use WebUI settings, `--model-capability-guard false` or `CODEBUDDY2API_MODEL_CAPABILITY_GUARD=false` to disable it. Explicit mismatches return 400 before sending, within existing bindings and the current free-first tier; unknown capabilities remain compatible. Requests retain their entry-time switch. Checks cover images, tools/history, declared reasoning options and the `max_tokens` output limit (including mapped Responses `max_output_tokens`); input tokens are not estimated, `max_completion_tokens` is not renamed or checked against this limit, and Anthropic thinking budgets are not converted. Disabling this guard leaves authentication, catalog authorization, capacity and size limits intact.
+
+Both international profiles merge image-bearing consecutive `user` runs only after routing, preserving content order and image data. Domestic bodies, text-only runs and system/assistant/tool boundaries remain unchanged. Conflicting message attributes or unrepresentable content return `400 / image_user_run_not_mergeable`; final byte limits still apply. This compatibility step remains enabled when capability preflight is disabled; it neither adds retries nor makes a text model natively visual. Downgrading source also requires removing the new startup option and any persisted `model_capability_guard` key using a compatible control-store backup.
+
+
 ## APIs and authentication
 
 | Client endpoint | Description |
@@ -92,7 +102,7 @@ Switch back to `legacy` to restore old behavior for new requests; in-flight requ
 | `POST /v1/responses` | OpenAI Responses |
 | `POST /v1/messages` | Anthropic Messages |
 | `POST /v1/messages/count_tokens` | Compatibility stub; currently returns `{"input_tokens":0}` without counting tokens |
-| `GET /v1/models` | Available models and multipliers |
+| `GET /v1/models` | Available models, multipliers and safe per-profile declarations |
 | `GET /v1/dashboard/billing/subscription` | Converted credit totals; `codebuddy_balance_usd` is the remaining balance |
 | `GET /v1/dashboard/billing/usage` | `total_usage` in cents and daily breakdowns |
 
@@ -143,7 +153,9 @@ The WebUI supports direct uploads; these rules concern path imports through `POS
 
 ## Models and scheduling
 
-Select client models from the WebUI or `GET /v1/models`. Catalogs are cached by account/tenant, region, product and client version in `auth/model-catalog.json`, with a default 6-hour TTL. New credentials trigger synchronization; failures retain only the same account's trusted cache. Legacy unscoped catalogs cannot authorize other accounts.
+Select client models from the WebUI or `GET /v1/models`. Raw catalogs remain cached by account/tenant, region, product and client version in `auth/model-catalog.json`, with a default 6-hour TTL. New credentials trigger synchronization; failed refreshes retain that account's trusted cache. Legacy unscoped caches do not become international sharing sources.
+
+International CLI and WorkBuddy use a deduplicated shared view from enabled, catalog-ready international accounts. A target account must have its own synchronized catalog; its existing model declarations win unchanged. Missing IDs inherit shared declarations, retaining `catalog_source` and safe `source_variants`. Conflicting inherited rates use the higher known rate, limits the smaller known value, reasoning options their intersection and differing descriptive fields are omitted; unknown prices never mean free. Domestic catalogs, credentials, balances, bindings and `auto` defaults remain independent. Shared rates are catalog references, not billing or permission guarantees.
 
 Each `/v3/config` refresh caches the agent picker subset as `models` and the account root table
 as `serves`. Routing and `GET /v1/models` merge these candidates, with picker metadata winning
@@ -166,9 +178,8 @@ Credential domain / token issuer determine the product identity. Chat and refres
 | `intl-cli` | `https://www.codebuddy.ai` |
 | `intl-work` | `https://www.workbuddy.ai` |
 
-- By default, accounts are selected only for models supported by their own trusted catalog
-  (picker ∪ account root table, see above); catalogs and balances are never borrowed across accounts. Concrete zero-multiplier models take priority, followed by expiring-credit priority, cooldowns and session stickiness.
-- Zero-balance accounts leave paid-model rotation but can still serve concrete zero-multiplier models declared by their own catalog; they rejoin once balance recovers. International paid models need a known positive balance, with an exception for concrete zero-multiplier models.
+- Domestic accounts use their own trusted catalogs; international accounts use the shared view above. Concrete zero-rate models take priority, followed by credit expiry, cooldowns and session stickiness. Balances are never borrowed.
+- Zero-balance accounts leave paid-model rotation but may use concrete zero-rate models in their effective catalog; they rejoin once balance recovers. International paid models require a known positive balance.
 - `auto` schedules an account's default, not any model. International accounts need positive balance and `default-model` in their catalog; domestic WorkBuddy must declare `auto`, and domestic CLI needs a known nonempty usable catalog. `auto` does not receive the concrete zero-multiplier balance exemption.
 - WebUI region, product and credential bindings strictly limit candidates; unavailable bindings never fall back to unselected accounts. Disabled models also reject direct requests. Renaming hides the original ID unless you choose to retain it.
 - Sent requests are not replayed against another account because of account availability or HTTP errors; later requests select again. Pending catalog/credential readiness usually returns 503 with `Retry-After`; unsupported or disabled models return 404.
@@ -208,7 +219,7 @@ Credential domain / token issuer determine the product identity. Chat and refres
 | Local 401 | Client key differs from the gateway key |
 | Upstream 401 / 403 | Credential-level authentication circuit opens; inspect and log in again in the WebUI |
 | 429 | Cool down that upstream model on the credential; later requests rebind automatically. All candidates cooling down still returns 429; with `--failover-max` the in-flight request is replayed on another credential instead |
-| Upstream `service info not found` (code 11102) | That backend does not serve the model at all: avoid it for the `(backend, model)` pair, route the model to another backend, and return 404 when none has it. Half-open after 6 h, exponential backoff up to 24 h, cleared at once by one successful call; inspect via `GET /admin/model-blocks` |
+| Upstream `service info not found` (11102) | Confirmed 400/404 model rejection backs off by `(backend, model)` domestically and `(account, product, model)` internationally. Return 404 when no candidate remains; half-open after 6 h, up to 24 h on repeats, cleared on success. Old international endpoint-wide entries no longer block accounts; inspect via `GET /admin/model-blocks` |
 | Connection setup failure | Retry once on a fresh connection: `ConnectError` and `ConnectTimeout` fail before the first body byte, so the upstream holds nothing and replaying cannot double-bill |
 | Post-send disconnect, read timeout or protocol error | No network replay, avoiding duplicate billing; logs include exception type and elapsed time |
 | Client hangs up before a non-streaming response is ready | The upstream call is cancelled and its concurrency slot returned at once; the request is audited as `cancelled`, never as a completed answer. Streaming already behaves this way |

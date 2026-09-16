@@ -265,7 +265,8 @@ def install_admin(app, config, gateway):
                     rule = snapshot["models"].get(source, {"public_id": source, "enabled": True, "keep_original": False,
                                                            "region": None, "profile": None, "credential_ids": []})
                     models.append({**item, **rule})
-                return JSONResponse({"revision": snapshot["revision"], "models": models})
+                return JSONResponse({"revision": snapshot["revision"], "models": models,
+                                     "model_capability_guard": config.get("model_capability_guard", True)})
         return await run_in_threadpool(build_models)
 
     def checked_rule(source, data, *, creating=False):

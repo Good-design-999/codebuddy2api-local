@@ -26,6 +26,7 @@ Compose 会显式传入部分环境变量及 CLI 参数，删除 `.env` 中的�
 | `--usd-rate` | `7.15` | 每美元对应人民币金额，用于 billing 折算 |
 | `--model-catalog-ttl` | `21600` | 模型目录缓存有效期，秒 |
 | `--no-model-guard` | 关 | 关闭目录外模型的本地拦截；表外透传仅限单产品，不绕过禁用、绑定或目录就绪检查 |
+| `--model-capability-guard [true/false]` | `true` | 预检模型声明的图片、工具、思考及已映射输出上限；新请求生效 |
 | `--max-images` | `16` | 单请求图片总数；`0` 不允许图片 |
 | `--image-policy` | `truncate` | 保留最新图片；设为 `error` 时超限返回 413 |
 | `--tool-call-max-retry` | `3` | 工具参数损坏时的额外生成上限（每次都消耗额度）；`0` 不重试 |
@@ -84,6 +85,15 @@ scoped 模式可选传入 `X-Codebuddy-Session-ID`、`metadata.conversation_id` 
 设回 `legacy` 即恢复新请求的旧行为，在途请求保留入口模式；源码降级前移除新增启动参数，并恢复不含 `request_context_mode` 的兼容控制库备份。
 
 
+### 模型声明与图片兼容
+
+`/v1/models` 保留原字段，增加 `capabilities`、`limits`、`metadata_by_profile`，管理接口及路由预览同步提供。能力状态为 `supported`、`unsupported`、`mixed`、`unknown`；限制含 `state`（`known`、`mixed`、`unknown`）和 `value`，仅已知且一致时返回数值。按产品保留不同账号的声明版本，但不公开账号身份。白名单覆盖说明、能力、窗口、思考选项、关联模型及参数建议；凭据、内部配置和带认证信息的 URL 不公开。上游声明不等于原生能力或实测保证，参数建议不自动覆盖请求。
+
+`model_capability_guard` 默认 `true`，可在 WebUI、`--model-capability-guard false` 或 `CODEBUDDY2API_MODEL_CAPABILITY_GUARD=false` 关闭。仅在现有绑定和当前免费优先范围内筛选，明确不兼容返回 400、不发上游；未知能力兼容放行，每条请求固定入口开关。检查图片、工具及历史、已声明思考选项，以及 `max_tokens` 输出上限（含 Responses 映射的 `max_output_tokens`）；不估算输入 token，不对 `max_completion_tokens` 改名或套用该上限，不转换 Anthropic 思考预算。关闭不绕过鉴权、目录授权、容量或大小限制。
+
+两种国际产品在选路后归并含图的连续 `user` 段，保留内容顺序和图片数据；国内请求、纯文本段及 system/assistant/tool 边界不变。消息级属性冲突或内容无法无损表达时返回 `400 / image_user_run_not_mergeable`，最终字节限制仍生效。图片兼容不随能力开关关闭，不增加重试，也不让文本模型获得原生视觉。源码降级还需移除新增启动选项，并使用不含 `model_capability_guard` 键的兼容控制库备份。
+
+
 ## API 与鉴权
 
 | 客户端接口 | 说明 |
@@ -92,7 +102,7 @@ scoped 模式可选传入 `X-Codebuddy-Session-ID`、`metadata.conversation_id` 
 | `POST /v1/responses` | OpenAI Responses |
 | `POST /v1/messages` | Anthropic Messages |
 | `POST /v1/messages/count_tokens` | 兼容占位接口，当前固定返回 `{"input_tokens":0}`，不实际计数 |
-| `GET /v1/models` | 可用模型及倍率信息 |
+| `GET /v1/models` | 可用模型、倍率及按产品区分的安全元数据 |
 | `GET /v1/dashboard/billing/subscription` | 积分折算额度；`codebuddy_balance_usd` 为剩余余额 |
 | `GET /v1/dashboard/billing/usage` | 美分计量的 `total_usage` 与按日明细 |
 
@@ -143,7 +153,9 @@ WebUI 可以直接上传文件；以下限制针对 `POST /admin/credentials` �
 
 ## 模型与调度
 
-以 WebUI 和 `GET /v1/models` 为客户端选择依据。目录按账号/租户、地域、产品与客户端版本缓存到 `auth/model-catalog.json`，默认有效期 6 小时；新凭据触发同步，失败只保留同一账号的可信旧缓存。旧未隔离的目录不能授权其他账号。
+以 WebUI 和 `GET /v1/models` 为客户端选择依据。原始目录仍按账号/租户、地域、产品与客户端版本缓存到 `auth/model-catalog.json`，默认有效期 6 小时；新凭据触发同步，刷新失败保留该账号的可信旧缓存。旧未隔离缓存不作为国际共享来源。
+
+国际 CLI／WorkBuddy 使用已启用、目录已就绪的国际账号生成去重共享视图。目标账号须完成自身目录同步；已有型号保留自己的完整声明，缺失型号才继承，并通过 `catalog_source`、安全 `source_variants` 标明来源。继承声明冲突时倍率取较高值、上限取较小值、思考选项取交集、描述类字段不一致即省略；未知倍率不当零。国内目录、凭据、余额、绑定及 `auto` 默认模型保持独立；共享倍率只是目录参考，不保证权限或实际扣分。
 
 每次 `/v3/config` 刷新将选择器子集缓存为 `models`，账号根表缓存为 `serves`。选路与
 `GET /v1/models` 合并这两组候选，同名保留选择器元数据；`disabled` 和 `availableModels`
@@ -164,8 +176,8 @@ WebUI 可以直接上传文件；以下限制针对 `POST /admin/credentials` �
 | `intl-cli` | `https://www.codebuddy.ai` |
 | `intl-work` | `https://www.workbuddy.ai` |
 
-- 默认仅为账号选择自身可信目录（选择器子集 ∪ 账号根表，见上文）支持的模型；目录和余额不跨账号借用。具体零倍率模型优先，其次按积分过期时间、冷却与会话黏绑调度。
-- 零余额账号退出付费模型轮询，仍可使用自身目录明确声明的具体零倍率模型；余额恢复后重新加入。国际付费模型须有已知正余额，具体零倍率模型可以例外。
+- 国内按自身可信目录选路，国际使用上述共享视图；具体零倍率模型优先，其次按积分过期时间、冷却与会话黏绑调度。余额始终不跨账号借用。
+- 零余额账号退出付费模型轮询，仍可使用有效目录中明确零倍率的具体模型；余额恢复后重新加入。国际付费模型须有已知正余额。
 - `auto` 是账号默认模型的调度别名，不代表任意模型。国际账号须有正余额且目录声明 `default-model`；国内 WorkBuddy 须声明 `auto`，国内 CLI 须有已知非空可用目录。`auto` 不享受具体零倍率模型的余额豁免。
 - WebUI 的地域、产品和凭证绑定严格限制候选账号，不会回退到未选账号。模型禁用后直接请求同样拒绝；改名默认不保留原 ID，只有选择保留时才同时提供旧 ID。
 - 已发送请求不会因账号不可用或 HTTP 错误换账号重放；后续请求才重新选路。目录同步或凭证未就绪通常返回带 `Retry-After` 的 503，不支持或禁用的模型返回 404。
@@ -205,7 +217,7 @@ WebUI 可以直接上传文件；以下限制针对 `POST /admin/credentials` �
 | 本地 401 | 客户端密钥与网关不一致 |
 | 上游 401 / 403 | 凭证级认证熔断；在 WebUI 检查并重新登录 |
 | 429 | 对该凭证的上游模型冷却，后续请求自动换绑；全部候选都在冷却时仍返回 429。设了 `--failover-max` 时，当前请求就地换凭证重放 |
-| 上游 `service info not found`（11102） | 该后端根本不服务这个模型：按 (后端, 模型) 避让，把该模型派给其他后端，全部后端都没有时返回 404。6 小时后半开放行重试，反复命中最长退避 24 小时，一次成功调用即刻解除；可用 `GET /admin/model-blocks` 查看 |
+| 上游 `service info not found`（11102） | 明确的 400/404 模型拒绝：国内按（后端、模型）退避，国际按（账号、产品、模型）隔离；无可用候选时返回 404。6 小时后半开，反复命中最长 24 小时，成功即解除。旧国际入口级记录不再拦截账号；用 `GET /admin/model-blocks` 查看 |
 | 建连失败 | `ConnectError` / `ConnectTimeout` 换新连接重放一次：两者都发生在写下第一个正文字节之前，上游手里什么都没有，重放不会重复计费 |
 | 发送后断连、读超时、协议错误 | 不做网络重放，避免重复计费；日志记录异常类型与耗时 |
 | 非流式响应还没成形，客户端就挂断 | 立刻取消这次上游调用并归还并发名额，审计记为 `cancelled`，不会被记成一次已完成的回答；流式本来就是这一行为 |

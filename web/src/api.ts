@@ -178,8 +178,15 @@ export type ModelRule = {
   credential_ids: string[];
   credits?: unknown;
   credits_by_profile?: unknown;
+  capabilities?: unknown;
+  limits?: unknown;
+  metadata_by_profile?: unknown;
 };
-export function modelResponse(value: unknown): { revision: number; models: ModelRule[] } {
+export function modelResponse(value: unknown): {
+  revision: number;
+  models: ModelRule[];
+  model_capability_guard?: boolean;
+} {
   const data = object(value);
   if (typeof data.revision !== "number") throw new Error("模型响应缺少 revision");
   const models = list(data.models).map((m) => {
@@ -207,7 +214,12 @@ export function modelResponse(value: unknown): { revision: number; models: Model
       credential_ids: m.credential_ids as string[],
     };
   });
-  return { revision: data.revision, models };
+  return {
+    revision: data.revision,
+    models,
+    model_capability_guard:
+      typeof data.model_capability_guard === "boolean" ? data.model_capability_guard : undefined,
+  };
 }
 export type Credential = RecordValue & { id: string; name: string | null };
 export function credentialResponse(value: unknown): Credential[] {

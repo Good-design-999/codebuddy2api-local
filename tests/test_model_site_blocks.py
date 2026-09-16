@@ -155,6 +155,8 @@ class PoolRoutingTests(unittest.TestCase):
         for entry in self.pool.entries():
             self.by_endpoint[self.pool._entry_endpoint(entry)] = (entry["cm"], entry["id"])
         self.assertEqual(set(self.by_endpoint), {DOMESTIC_ENDPOINT, INTL_ENDPOINT})
+        self.intl_block_key = next(self.pool._model_block_key(entry) for entry in self.pool.entries()
+                                   if entry["profile"] == INTL_PROFILE)
         self.addCleanup(converter.invalidate_model_table)
 
     def cred_for(self, model=MODEL, region=None):
@@ -165,7 +167,7 @@ class PoolRoutingTests(unittest.TestCase):
         """Route to an eligible domestic backend after an international unsupported-model response."""
         cm, _ = self.by_endpoint[INTL_ENDPOINT]
         self.pool.note_status(cm, 404, model=MODEL, raw=_error_body(11102, "service info not found"))
-        self.assertTrue(self.pool._blocks.blocked(INTL_ENDPOINT, MODEL))
+        self.assertTrue(self.pool._blocks.blocked(self.intl_block_key, MODEL))
         self.assertIsNone(self.pool.model_block_until(MODEL))            # Another backend remains eligible.
         (picked_cm, _generation), _headers = self.cred_for()
         self.assertIs(picked_cm, self.by_endpoint[DOMESTIC_ENDPOINT][0])
@@ -179,7 +181,7 @@ class PoolRoutingTests(unittest.TestCase):
         self.assertGreater(self.pool._model_fail[(cid, MODEL)], time.time())
         cm, _ = self.by_endpoint[INTL_ENDPOINT]
         self.pool.note_status(cm, 404, model=MODEL, raw=_error_body(11102, "service info not found"))
-        self.assertTrue(self.pool._blocks.blocked(INTL_ENDPOINT, MODEL))
+        self.assertTrue(self.pool._blocks.blocked(self.intl_block_key, MODEL))
 
     def test_fast_failure_when_no_backend_serves_it(self):
         """Return HTTP 404 when every backend lacks the requested model."""
@@ -225,6 +227,25 @@ class PoolRoutingTests(unittest.TestCase):
         path.write_text(json.dumps(value), encoding="utf-8")
         self.pool.reload([Path(e["id"]) for e in self.pool.entries()] + [path])
         return next(e for e in self.pool.entries() if e["uid"] == uid)
+
+    def test_international_rejection_is_isolated_to_one_account_and_model(self):
+        other = self.add_account("www.codebuddy.ai", "synthetic-intl-other")
+        cm, _ = self.by_endpoint[INTL_ENDPOINT]
+        current = next(entry for entry in self.pool.entries() if entry["cm"] is cm)
+        self.pool.note_status(cm, 404, model=MODEL, raw=_error_body(11102, "service info not found"))
+        self.assertFalse(self.pool._model_servable(current, MODEL))
+        self.assertTrue(self.pool._model_servable(other, MODEL))
+        self.assertTrue(self.pool._model_servable(current, OTHER_MODEL))
+        self.assertTrue(self.pool._healthy(current))
+        self.assertIsNone(self.pool.model_block_until(MODEL, region="intl"))
+        self.assertFalse(self.pool._blocks.blocked(INTL_ENDPOINT, MODEL))
+
+    def test_stale_model_rejection_does_not_block_a_new_generation(self):
+        cm, _ = self.by_endpoint[INTL_ENDPOINT]
+        self.pool.note_status(cm, 404, model=MODEL, raw=_error_body(11102, "service info not found"),
+                              generation=cm._generation - 1)
+        self.assertFalse(self.pool._blocks.blocked(self.intl_block_key, MODEL))
+
 
     def test_same_region_product_without_root_model_does_not_cancel_block(self):
         self.add_account("www.workbuddy.cn", "synthetic-cn-work")
@@ -324,9 +345,9 @@ class PoolRoutingTests(unittest.TestCase):
         """Clear model backoff immediately after a successful response."""
         cm, _ = self.by_endpoint[INTL_ENDPOINT]
         self.pool.note_status(cm, 404, model=MODEL, raw=_error_body(11102, "service info not found"))
-        self.assertTrue(self.pool._blocks.blocked(INTL_ENDPOINT, MODEL))
+        self.assertTrue(self.pool._blocks.blocked(self.intl_block_key, MODEL))
         self.assertTrue(self.pool.note_model_ok(cm, MODEL))
-        self.assertFalse(self.pool._blocks.blocked(INTL_ENDPOINT, MODEL))
+        self.assertFalse(self.pool._blocks.blocked(self.intl_block_key, MODEL))
         self.assertFalse(self.pool.note_model_ok(cm, MODEL))
 
     def test_blocks_survive_restart(self):
@@ -336,16 +357,16 @@ class PoolRoutingTests(unittest.TestCase):
         reopened = converter.CredentialPool(
             [self.root / ("synthetic-" + profile + ".info") for profile in DOMAINS],
             blocks_path=self.root / "model-site-blocks.json")
-        self.assertTrue(reopened._blocks.blocked(INTL_ENDPOINT, MODEL))
-        self.assertEqual([row["endpoint"] for row in reopened.model_blocks_detail()], [INTL_ENDPOINT])
+        self.assertTrue(reopened._blocks.blocked(self.intl_block_key, MODEL))
+        self.assertEqual([row["endpoint"] for row in reopened.model_blocks_detail()], [self.intl_block_key])
 
     def test_alias_auto_is_blocked_under_client_name(self):
         """Track the public auto model despite its international upstream alias."""
         cm, _ = self.by_endpoint[INTL_ENDPOINT]
         self.pool.note_status(cm, 404, model="default-model",
                               raw=_error_body(11102, "service info not found"))
-        self.assertTrue(self.pool._blocks.blocked(INTL_ENDPOINT, "auto"))
-        self.assertFalse(self.pool._blocks.blocked(INTL_ENDPOINT, "default-model"))
+        self.assertTrue(self.pool._blocks.blocked(self.intl_block_key, "auto"))
+        self.assertFalse(self.pool._blocks.blocked(self.intl_block_key, "default-model"))
 
 
 if __name__ == "__main__":

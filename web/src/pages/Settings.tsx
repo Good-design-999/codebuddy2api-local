@@ -134,6 +134,11 @@ function SettingsForm({
             <div className={s.setting} key={item.key}>
               <div className={s.settingDescription}>
                 <strong title={item.key}>{item.label}</strong>
+                {item.key === "model_capability_guard" && (
+                  <small>
+                    仅关闭新增能力预检；元数据展示、国际图片归并及其他安全限制不变，新请求生效。
+                  </small>
+                )}
                 <div className={s.actions}>
                   <Badge>{sourceLabels[item.source] ?? "未知来源"}</Badge>
                   <Badge tone={item.mode === "hot" ? "good" : "warn"}>

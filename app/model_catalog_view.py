@@ -73,7 +73,9 @@ def _common_model(sources):
         result["reasoning"] = reasoning
     else:
         result.pop("reasoning", None)
-    for field in ("isDefault", "relatedModels", "contextWindow", "temperature", "top_p", "top_k", "repetition_penalty"):
+    for field in ("isDefault", "relatedModels", "contextWindow", "temperature", "top_p", "top_k",
+                  "repetition_penalty", "name", "vendor", "description", "descriptionZh",
+                  "descriptionEn", "tags", "iconUrl"):
         values = [model.get(field) for model in models]
         if field == "isDefault" or any(value != values[0] for value in values):
             result.pop(field, None)

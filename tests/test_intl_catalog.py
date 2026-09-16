@@ -34,14 +34,23 @@ class CatalogViewTests(unittest.TestCase):
     def test_source_conflicts_are_conservative_and_original_variants_remain_safe(self):
         yes = model(maxOutputTokens=4096, credits="x0.00", supportsImages=True,
                     reasoning={"supportedEfforts": ["low", "high"], "canDisableThinking": True})
-        no = model(maxOutputTokens=2048, credits="x0.30", supportsImages=False,
+        no = model(maxOutputTokens=2048, credits="x0.30", supportsImages=False, name="Kept name",
+                   descriptionZh="来源说明", tags=["a"],
                    reasoning={"supportedEfforts": ["high"], "canDisableThinking": False})
+        yes.update(vendor="shared-vendor")
+        no.update(vendor="shared-vendor", iconUrl="https://example.invalid/icon.svg")
+        yes.update(iconUrl=no["iconUrl"])
         no.update(accessToken="private-secret", uid="private-account")
         result = share_models([], "intl-cli", [("intl-work", [yes, no])])[0]
         self.assertEqual(result["credits"], "x0.30")
         self.assertEqual(result["maxOutputTokens"], 2048)
         self.assertFalse(result["supportsImages"])
         self.assertEqual(result["reasoning"]["supportedEfforts"], ["high"])
+        self.assertNotIn("name", result)            # conflicting display text is omitted, not first-source
+        self.assertNotIn("descriptionZh", result)
+        self.assertNotIn("tags", result)
+        self.assertEqual(result["vendor"], "shared-vendor")
+        self.assertEqual(result["iconUrl"], no["iconUrl"])
         safe = caps.describe_models([("intl-cli", result)])
         text = json.dumps(safe)
         self.assertNotIn("private-secret", text)

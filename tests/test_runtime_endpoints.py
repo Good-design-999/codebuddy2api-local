@@ -816,12 +816,13 @@ class ConfigurationTests(unittest.TestCase):
             if expected_host is not None:
                 self.assertEqual(server.call_args.kwargs["host"], expected_host)
             return {key: converter.CONFIG[key] for key in (
-                "max_images", "image_policy", "max_request_bytes", "log_body_limit", "admin_csrf", "keep_tool_metadata")}
+                "max_images", "image_policy", "max_request_bytes", "log_body_limit", "admin_csrf",
+                "keep_tool_metadata", "admin_allowed_origins")}
 
     def test_defaults(self):
         self.assertEqual(self.configure(), {"max_images": 16, "image_policy": "truncate",
                                            "max_request_bytes": 33554432, "log_body_limit": 65536,
-                                           "admin_csrf": True, "keep_tool_metadata": False})
+                                           "admin_csrf": True, "keep_tool_metadata": False, "admin_allowed_origins": ""})
 
     def test_open_binding_without_key_requires_explicit_opt_in(self):
         # Reject unauthenticated public binding by default.
@@ -849,7 +850,7 @@ class ConfigurationTests(unittest.TestCase):
                "CODEBUDDY2API_MAX_REQUEST_BYTES": "100000", "CODEBUDDY2API_LOG_BODY_LIMIT": "0"}
         self.assertEqual(self.configure(env), {"max_images": 8, "image_policy": "error",
                                                "max_request_bytes": 100000, "log_body_limit": 0,
-                                               "admin_csrf": True, "keep_tool_metadata": False})
+                                               "admin_csrf": True, "keep_tool_metadata": False, "admin_allowed_origins": ""})
         env["CODEBUDDY2API_IMAGE_POLICY"] = "invalid-overridden"
         self.assertEqual(self.configure(env, ("--max-images", "0", "--image-policy", "truncate"))["max_images"], 0)
 
@@ -885,14 +886,30 @@ class ConfigurationTests(unittest.TestCase):
         self.configure({key: ""}, invalid=True)
         self.configure(flags=("--keep-tool-metadata", "invalid"), invalid=True)
 
+    def test_admin_allowed_origins_flag_and_environment_precedence(self):
+        key = "CODEBUDDY2API_ADMIN_ORIGINS"
+        cases = [
+            ({}, (), ""),
+            ({key: "chat.example.com"}, (), "https://chat.example.com"),
+            ({key: "env.example.com"}, ("--admin-allowed-origins", "cli.example.com:8443"), "https://cli.example.com:8443"),
+            ({}, ("--admin-allowed-origins", "a.example.com,http://b.example.com:8080"), "https://a.example.com,http://b.example.com:8080"),
+            ({key: "invalid-overridden"}, ("--admin-allowed-origins", "cli.example.com"), "https://cli.example.com"),
+        ]
+        for env, flags, expected in cases:
+            with self.subTest(env=env, flags=flags):
+                self.assertEqual(self.configure(env, flags)["admin_allowed_origins"], expected)
+
     def test_invalid_config_fails_before_side_effects(self):
         for env in ({"CODEBUDDY2API_MAX_IMAGES": "-1"}, {"CODEBUDDY2API_MAX_IMAGES": "1.5"},
                     {"CODEBUDDY2API_IMAGE_POLICY": "drop"}, {"CODEBUDDY2API_MAX_REQUEST_BYTES": "0"},
-                    {"CODEBUDDY2API_LOG_BODY_LIMIT": "-1"}, {"CODEBUDDY2API_ADMIN_CSRF": "invalid"}):
+                    {"CODEBUDDY2API_LOG_BODY_LIMIT": "-1"}, {"CODEBUDDY2API_ADMIN_CSRF": "invalid"},
+                    {"CODEBUDDY2API_ADMIN_ORIGINS": "ftp://example.com"},
+                    {"CODEBUDDY2API_ADMIN_ORIGINS": "https://example.com/path"}):
             with self.subTest(env=env):
                 self.configure(env, invalid=True)
         self.configure(flags=("--max-images", "-1"), invalid=True)
         self.configure(flags=("--admin-csrf", "invalid"), invalid=True)
+        self.configure(flags=("--admin-allowed-origins", "example.com:0"), invalid=True)
 
 
 class LogIntegrationTests(unittest.TestCase):

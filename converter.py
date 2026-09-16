@@ -1506,6 +1506,7 @@ async def _protocol_http_exception(request: Request, exc: HTTPException):
     return JSONResponse(body, status_code=exc.status_code, headers=exc.headers)
 CONFIG: dict = {"api_key": "", "cred": None, "log_path": None, "ledger": None,
                 "admin_csrf": True,     # Startup-only Origin/CSRF policy
+                "admin_allowed_origins": "",  # Extra trusted management Origins (hot)
                 "models_remote": None,   # Domestic cloud model inventory
                 "models_intl": None,     # Eligible international model inventory
                 "model_cache": None,     # Versioned catalog cache
@@ -3491,6 +3492,14 @@ def _positive_int(value):
     return number
 
 
+def _origins_arg(value):
+    from app.settings import normalize_allowed_origins
+    try:
+        return normalize_allowed_origins(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("必须为逗号分隔的 http/https 来源或域名") from None
+
+
 def _boolean_arg(value):
     if isinstance(value, bool):
         return value
@@ -3517,6 +3526,10 @@ def main():
     ap.add_argument("--admin-csrf", type=_boolean_arg, nargs="?", const=True,
                     default=os.environ.get("CODEBUDDY2API_ADMIN_CSRF", "true"),
                     help="管理 Origin/CSRF 校验，默认 true；仅在受信任本地环境设为 false，鉴权仍启用")
+    ap.add_argument("--admin-allowed-origins", type=_origins_arg, metavar="ORIGINS",
+                    default=os.environ.get("CODEBUDDY2API_ADMIN_ORIGINS"),
+                    help="额外信任的管理页来源（逗号分隔，支持域名或完整来源，裸域名按 https）；"
+                         "反代 HTTPS 域名登录报 Origin 校验失败时设置，也可在 WebUI 配置")
     ap.add_argument("--log", default=None, metavar="PATH",
                     help="额外写入兼容文本日志（如 --log converter.log 或 --log /tmp/cb.log）。"
                          "不传仍记录 SQLite 审计，但不输出文本文件。")
@@ -3601,7 +3614,7 @@ def main():
     for key in ("max_images", "image_policy", "max_request_bytes", "log_body_limit",
                 "tool_call_max_retry", "max_inbound_bytes", "max_collect_bytes", "max_concurrent",
                 "failover_max", "retry_write_timeout", "upstream_keepalive", "max_inflight_per_account",
-                "request_context_mode", "model_capability_guard"):
+                "request_context_mode", "model_capability_guard", "admin_allowed_origins"):
         CONFIG[key] = getattr(args, key)
     CONFIG["api_key"] = args.api_key
     CONFIG["desensitize"] = args.desensitize

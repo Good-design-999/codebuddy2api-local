@@ -41,7 +41,7 @@ Compose explicitly passes some environment variables and CLI flags, so deleting 
 | `--max-request-bytes` | `33554432` | Positive byte limit for the processed upstream JSON |
 | `--log-body-limit` | `65536` | Text-log body preview bytes; `0` logs summaries only, not the SQLite diagnostic budget |
 
-Environment variables include `CODEBUDDY_AUTH_DIR`, `CODEBUDDY_IMPORT_DIR`, `CODEBUDDY2API_KEY`, `CODEBUDDY2API_ADMIN_CSRF`, `CODEBUDDY2API_KEEP_TOOL_METADATA`, `CODEBUDDY2API_LOG`, `CODEBUDDY2API_MAX_IMAGES`, `CODEBUDDY2API_IMAGE_POLICY`, `CODEBUDDY2API_MAX_REQUEST_BYTES`, `CODEBUDDY2API_LOG_BODY_LIMIT`, `CODEBUDDY2API_FAILOVER_MAX` and `CODEBUDDY2API_RETRY_WRITE_TIMEOUT`. See [deployment](deployment.md) for startup examples.
+Environment variables include `CODEBUDDY_AUTH_DIR`, `CODEBUDDY_IMPORT_DIR`, `CODEBUDDY2API_KEY`, `CODEBUDDY2API_ADMIN_CSRF`, `CODEBUDDY2API_ADMIN_ORIGINS`, `CODEBUDDY2API_KEEP_TOOL_METADATA`, `CODEBUDDY2API_LOG`, `CODEBUDDY2API_MAX_IMAGES`, `CODEBUDDY2API_IMAGE_POLICY`, `CODEBUDDY2API_MAX_REQUEST_BYTES`, `CODEBUDDY2API_LOG_BODY_LIMIT`, `CODEBUDDY2API_FAILOVER_MAX` and `CODEBUDDY2API_RETRY_WRITE_TIMEOUT`. See [deployment](deployment.md) for startup examples.
 
 `CODEBUDDY2API_AUTO_ACCEPT_BUDDY` is startup-only and defaults to `false`. It preauthorizes enabled domestic accounts for first-Buddy onboarding, agreement and travel; automatic travel still respects its account switch. `first_buddy` needs no acceptance API: pending states, including `not_accepted`, allow one real domestic WorkBuddy conversation on that account. Prefer an eligible zero-rate model, otherwise the lowest known rate; request at most 32 output tokens with possible credit usage. Other reward tasks, paid boxes, pet switching and international trials are excluded.
 
@@ -130,7 +130,7 @@ Management requires an API key. The WebUI exchanges that key for an HttpOnly man
 
 Enabled by default. When OAuth polling omits both `Origin` and `Sec-Fetch-Site`, a same-origin `Referer` (matching scheme, host and port) is accepted, but a valid CSRF token is still required. An existing `Origin` takes precedence; without it, supplied Fetch Metadata must be `same-origin` and cannot fall back to Referer. Login and writes still require Origin.
 
-Normal same-origin access does not require disabling protection. If errors persist, use a consistent access URL, check the proxy's forwarded Host/scheme, and refresh the page and log in again. Only for trusted local deployments, append `--admin-csrf false` to the startup command or set this in your existing `.env`:
+Normal same-origin access does not require disabling protection. Behind a reverse proxy that rewrites the forwarded Host/scheme (for example HTTPS on a bound domain while the container sees HTTP), the browser Origin no longer matches what the server sees and login fails Origin checks. Add the public address to `admin_allowed_origins` (WebUI system settings, hot) or set `CODEBUDDY2API_ADMIN_ORIGINS` / `--admin-allowed-origins`: comma separated origins or bare domains (`https://chat.example.com`, `chat.example.com`; bare domains mean HTTPS), up to 32 entries. An explicit CLI or environment value locks the WebUI field. Prefer this over disabling protection; if errors persist, use a consistent access URL, check the proxy's forwarded Host/scheme, and refresh the page and log in again. Only for trusted local deployments, append `--admin-csrf false` to the startup command or set this in your existing `.env`:
 
 ```dotenv
 CODEBUDDY2API_ADMIN_CSRF=false

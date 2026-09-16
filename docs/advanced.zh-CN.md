@@ -41,7 +41,7 @@ Compose 会显式传入部分环境变量及 CLI 参数，删除 `.env` 中的�
 | `--max-request-bytes` | `33554432` | 处理后的上游 JSON 字节上限，须为正整数 |
 | `--log-body-limit` | `65536` | 兼容文本日志正文预览字节；`0` 只记摘要，不控制 SQLite 诊断预算 |
 
-环境变量包括 `CODEBUDDY_AUTH_DIR`、`CODEBUDDY_IMPORT_DIR`、`CODEBUDDY2API_KEY`、`CODEBUDDY2API_ADMIN_CSRF`、`CODEBUDDY2API_KEEP_TOOL_METADATA`、`CODEBUDDY2API_LOG`，以及 `CODEBUDDY2API_MAX_IMAGES`、`CODEBUDDY2API_IMAGE_POLICY`、`CODEBUDDY2API_MAX_REQUEST_BYTES`、`CODEBUDDY2API_LOG_BODY_LIMIT`、`CODEBUDDY2API_FAILOVER_MAX`、`CODEBUDDY2API_RETRY_WRITE_TIMEOUT`。启动示例见 [部署指南](deployment.zh-CN.md)。
+环境变量包括 `CODEBUDDY_AUTH_DIR`、`CODEBUDDY_IMPORT_DIR`、`CODEBUDDY2API_KEY`、`CODEBUDDY2API_ADMIN_CSRF`、`CODEBUDDY2API_ADMIN_ORIGINS`、`CODEBUDDY2API_KEEP_TOOL_METADATA`、`CODEBUDDY2API_LOG`，以及 `CODEBUDDY2API_MAX_IMAGES`、`CODEBUDDY2API_IMAGE_POLICY`、`CODEBUDDY2API_MAX_REQUEST_BYTES`、`CODEBUDDY2API_LOG_BODY_LIMIT`、`CODEBUDDY2API_FAILOVER_MAX`、`CODEBUDDY2API_RETRY_WRITE_TIMEOUT`。启动示例见 [部署指南](deployment.zh-CN.md)。
 
 `CODEBUDDY2API_AUTO_ACCEPT_BUDDY` 仅启动读取，默认 `false`；预授权已启用国内账号完成首次领猫任务、协议及旅行，自动旅行仍受账号开关控制。`first_buddy` 无需单独接取，包含 `not_accepted` 在内的待完成状态可直接发起一次本账号的真实国内 WorkBuddy 对话；优先可用零倍率模型，否则取最低已知倍率，最多请求 32 个输出 token，可能消耗少量积分。不执行其他奖励任务、不付费开盒、不切猫、不领取国际试用积分。
 
@@ -130,7 +130,7 @@ scoped 模式可选传入 `X-Codebuddy-Session-ID`、`metadata.conversation_id` 
 
 默认开启。OAuth 轮询在 `Origin`、`Sec-Fetch-Site` 均缺失时，兼容同源 `Referer`（协议、主机、端口一致），仍要求有效 CSRF token。已有 `Origin` 优先校验；无 `Origin` 但有 Fetch Metadata 时，只接受 `same-origin`，不会再用 Referer 回退。登录和写操作仍要求 Origin。
 
-正常同源访问不需要关闭保护。若仍报错，先统一访问地址、检查反代传递的 Host 和协议，并刷新页面重新登录。仅在受信任本地环境需要关闭时，在原启动命令追加 `--admin-csrf false`，或在已有 `.env` 中设置：
+正常同源访问不需要关闭保护。反代改写转发的 Host 或协议时（例如域名 HTTPS 访问而容器内看到 HTTP），浏览器 Origin 与服务端看到的地址不一致，登录会报 Origin 校验失败。把对外地址加入 `admin_allowed_origins`（WebUI 系统设置，即时生效），或设置 `CODEBUDDY2API_ADMIN_ORIGINS` / `--admin-allowed-origins`：逗号分隔的来源或裸域名（如 `https://chat.example.com`、`chat.example.com`，裸域名按 HTTPS），最多 32 条。CLI 或环境变量显式设置后 WebUI 字段锁定。优先使用此白名单而非关闭保护；若仍报错，先统一访问地址、检查反代传递的 Host 和协议，并刷新页面重新登录。仅在受信任本地环境需要关闭时，在原启动命令追加 `--admin-csrf false`，或在已有 `.env` 中设置：
 
 ```dotenv
 CODEBUDDY2API_ADMIN_CSRF=false

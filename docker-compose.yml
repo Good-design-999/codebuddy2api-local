@@ -18,6 +18,7 @@ services:
       # First-Buddy onboarding may send one bounded real WorkBuddy conversation per account.
       CODEBUDDY2API_AUTO_ACCEPT_BUDDY: ${CODEBUDDY2API_AUTO_ACCEPT_BUDDY:-false}
       # Unset variables remain configurable through the WebUI.
+      CODEBUDDY2API_ADMIN_ORIGINS:
       CODEBUDDY2API_KEEP_TOOL_METADATA:
       CODEBUDDY2API_MAX_IMAGES: ${CODEBUDDY2API_MAX_IMAGES:-16}
       CODEBUDDY2API_IMAGE_POLICY: ${CODEBUDDY2API_IMAGE_POLICY:-truncate}

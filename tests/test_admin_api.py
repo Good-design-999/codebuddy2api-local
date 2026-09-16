@@ -13,7 +13,7 @@ from fastapi import FastAPI, Header
 from fastapi.testclient import TestClient
 
 from app.admin_api import CLEAR_CONFIRMATION, install_admin
-from app.admin_auth import COOKIE_NAME, same_origin
+from app.admin_auth import COOKIE_NAME, origin_allowlist, same_origin
 from app.control_store import ControlStore
 
 
@@ -128,6 +128,66 @@ class AdminApiTests(unittest.TestCase):
                                    "headers": [(key.lower().encode(), value.encode()) for key, value in headers.items()]})
                 self.assertIs(same_origin(request), expected)
 
+
+    def test_same_origin_allowlist_matches_exact_origin_only(self):
+        from starlette.requests import Request
+
+        def check(headers, allowed, method="GET"):
+            request = Request({"type": "http", "method": method, "scheme": "http",
+                               "server": ("testserver", 80), "path": "/admin/session", "query_string": b"",
+                               "headers": [(key.lower().encode(), value.encode()) for key, value in headers.items()]})
+            return same_origin(request, allowed)
+
+        allowed = origin_allowlist("https://chat.example.com,http://10.0.0.1:8787")
+        self.assertEqual(allowed, frozenset({("https", "chat.example.com", 443), ("http", "10.0.0.1", 8787)}))
+        self.assertTrue(check({"Origin": "https://chat.example.com"}, allowed))
+        self.assertTrue(check({"Origin": "https://CHAT.example.com:443"}, allowed))
+        self.assertTrue(check({"Origin": "http://10.0.0.1:8787"}, allowed))
+        self.assertFalse(check({"Origin": "http://chat.example.com"}, allowed))
+        self.assertFalse(check({"Origin": "https://chat.example.com:8443"}, allowed))
+        self.assertFalse(check({"Origin": "https://sub.chat.example.com"}, allowed))
+        self.assertFalse(check({"Origin": "https://chat.example.com/path"}, allowed))
+        self.assertFalse(check({"Origin": "https://evil.invalid"}, allowed))
+        self.assertFalse(check({"Origin": "null"}, allowed))
+        self.assertFalse(check({}, allowed, method="POST"))
+        self.assertFalse(check({"Referer": "https://chat.example.com/dashboard"}, allowed))
+        self.assertTrue(check({"Origin": "http://testserver"}, ()))
+
+    def test_allowed_origins_permit_foreign_origin_login_and_cookie_writes(self):
+        self.config["admin_allowed_origins"] = "https://chat.example.com"
+        foreign = {"Origin": "https://chat.example.com"}
+        self.assertEqual(self.client.post("/admin/session", json={"api_key": "synthetic-key"}).status_code, 403)
+        self.assertEqual(self.client.post("/admin/session", json={"api_key": "synthetic-key"},
+                                          headers={"Origin": "https://evil.invalid"}).status_code, 403)
+        login = self.client.post("/admin/session", json={"api_key": "synthetic-key"}, headers=foreign)
+        self.assertEqual(login.status_code, 200, login.text)
+        csrf = {**foreign, "X-CSRF-Token": login.json()["csrf_token"]}
+        self.assertEqual(self.client.post("/admin/legacy", headers=csrf).status_code, 200)
+        self.assertEqual(self.client.post("/admin/legacy", headers={**csrf, "Origin": "https://evil.invalid"}).status_code, 403)
+
+    def test_allowed_origins_setting_validates_normalizes_and_applies_hot(self):
+        response = self.client.patch("/admin/settings", headers=self.headers, json={
+            "revision": 0, "values": {"admin_allowed_origins": "chat.example.com, http://10.0.0.1:8787/ https://dup.example.com,,https://dup.example.com"}})
+        self.assertEqual(response.status_code, 200, response.text)
+        stored = self.store.snapshot()["settings"]["admin_allowed_origins"]
+        self.assertEqual(stored, "https://chat.example.com,http://10.0.0.1:8787,https://dup.example.com")
+        self.assertEqual(self.config["admin_allowed_origins"], stored)
+        login = self.client.post("/admin/session", json={"api_key": "synthetic-key"},
+                                 headers={"Origin": "https://chat.example.com"})
+        self.assertEqual(login.status_code, 200, login.text)
+        cleared = self.client.patch("/admin/settings", headers=self.headers, json={
+            "revision": 1, "values": {"admin_allowed_origins": ""}})
+        self.assertEqual(cleared.status_code, 200, cleared.text)
+        self.assertEqual(self.config["admin_allowed_origins"], "")
+        self.assertEqual(self.client.post("/admin/session", json={"api_key": "synthetic-key"},
+                                          headers={"Origin": "https://chat.example.com"}).status_code, 403)
+        for invalid in ("ftp://chat.example.com", "https://chat.example.com/path", "http://user@chat.example.com",
+                        "https://chat.example.com#fragment", "https://chat.example.com:0", "::"):
+            with self.subTest(invalid=invalid):
+                rejected = self.client.patch("/admin/settings", headers=self.headers, json={
+                    "revision": self.store.snapshot()["revision"], "values": {"admin_allowed_origins": invalid}})
+                self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(self.store.snapshot()["settings"]["admin_allowed_origins"], "")
     def test_lan_oauth_poll_uses_referer_without_disabling_csrf(self):
         origin = "http://192.168.1.10:8787"
         client = self.enterContext(TestClient(self.app, base_url=origin))

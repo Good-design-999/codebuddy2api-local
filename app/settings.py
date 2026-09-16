@@ -3,10 +3,39 @@ from __future__ import annotations
 
 import math
 import os
+import re
+from urllib.parse import urlsplit
+
+
+def normalize_allowed_origins(value):
+    """Normalize a comma/space separated origin list; bare hosts default to HTTPS."""
+    entries = [entry for entry in re.split(r"[\s,]+", value.strip()) if entry]
+    if len(entries) > 32:
+        raise ValueError("admin_allowed_origins: 来源数量超出上限")
+    normalized = []
+    for entry in entries:
+        candidate = entry if "://" in entry else f"https://{entry}"
+        try:
+            parts = urlsplit(candidate)
+            port = parts.port
+        except ValueError:
+            raise ValueError(f"admin_allowed_origins: 来源无效 {entry!r}") from None
+        if (parts.scheme not in ("http", "https") or not parts.hostname
+                or parts.username is not None or parts.password is not None
+                or parts.path not in ("", "/") or parts.query or parts.fragment
+                or (port is not None and not 1 <= port <= 65535)):
+            raise ValueError(f"admin_allowed_origins: 来源无效 {entry!r}")
+        host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+        default_port = 443 if parts.scheme == "https" else 80
+        origin = f"{parts.scheme}://{host}" + (f":{port}" if port is not None and port != default_port else "")
+        if origin not in normalized:
+            normalized.append(origin)
+    return ",".join(normalized)
+
 
 
 def _item(default, type_, label, *, mode="hot", env=None, minimum=None, maximum=None,
-          choices=None, sensitive=False):
+          choices=None, sensitive=False, allow_empty=False, max_length=255, validator=None):
     value = {"default": default, "type": type_, "label": label, "mode": mode,
              "env": env, "sensitive": sensitive}
     if minimum is not None:
@@ -15,6 +44,12 @@ def _item(default, type_, label, *, mode="hot", env=None, minimum=None, maximum=
         value["max"] = maximum
     if choices is not None:
         value["choices"] = choices
+    if allow_empty:
+        value["allow_empty"] = True
+    if max_length != 255:
+        value["max_length"] = max_length
+    if validator is not None:
+        value["validator"] = validator
     return value
 
 
@@ -26,6 +61,8 @@ SCHEMA = {
     "auth_dir": _item(None, "path", "凭证目录", mode="startup", env="CODEBUDDY_AUTH_DIR", sensitive=True),
     "import_dir": _item(None, "path", "导入目录", mode="startup", env="CODEBUDDY_IMPORT_DIR", sensitive=True),
     "log_path": _item(None, "path", "兼容文本日志", mode="startup", env="CODEBUDDY2API_LOG", sensitive=True),
+    "admin_allowed_origins": _item("", "string", "管理页额外信任来源", env="CODEBUDDY2API_ADMIN_ORIGINS",
+                                   allow_empty=True, max_length=2000, validator=normalize_allowed_origins),
     "desensitize": _item(False, "boolean", "提示词脱敏"),
     "no_compact": _item(False, "boolean", "保留提示词全文"),
     "keep_tool_metadata": _item(False, "boolean", "保留工具描述", env="CODEBUDDY2API_KEEP_TOOL_METADATA"),
@@ -70,13 +107,18 @@ def validate_settings(values, *, legacy=False):
         valid = ((kind == "boolean" and type(value) is bool)
                  or (kind == "integer" and type(value) is int)
                  or (kind == "number" and type(value) in (int, float) and math.isfinite(value))
-                 or (kind == "string" and isinstance(value, str) and 0 < len(value) <= 255 and not any(ord(c) < 32 for c in value)))
+                 or (kind == "string" and isinstance(value, str)
+                     and (spec.get("allow_empty") or 0 < len(value))
+                     and len(value) <= spec.get("max_length", 255)
+                     and not any(ord(c) < 32 for c in value)))
         if not valid:
             raise ValueError(f"{key}: 类型或值无效")
         if "min" in spec and value < spec["min"] or "max" in spec and value > spec["max"]:
             raise ValueError(f"{key}: 超出允许范围")
         if "choices" in spec and value not in spec["choices"]:
             raise ValueError(f"{key}: 不支持的选项")
+        if spec.get("validator"):
+            value = spec["validator"](value)
         clean[key] = value
     return clean
 

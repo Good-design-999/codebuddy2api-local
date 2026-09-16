@@ -81,13 +81,16 @@ class DeploymentTests(unittest.TestCase):
         self.assertNotIn("CODEBUDDY2API_AUTO_TRIAL", values)
         self.assertNotIn("CODEBUDDY2API_AUTO_TRIAL", (ROOT / "docker-compose.yml").read_text())
         self.assertEqual(values["CODEBUDDY2API_ADMIN_CSRF"], str(RUNTIME_DEFAULTS["admin_csrf"]).lower())
+        self.assertNotIn("CODEBUDDY2API_ADMIN_ORIGINS", values)
         self.assertNotIn("CODEBUDDY2API_KEEP_TOOL_METADATA", values)
 
     def test_tool_metadata_compose_environment_is_optional(self):
         key = "CODEBUDDY2API_KEEP_TOOL_METADATA"
         self.assertRegex((ROOT / "docker-compose.yml").read_text(), rf"(?m)^ +{key}: *$")
         self.assertRegex((ROOT / ".env.example").read_text(), rf"(?m)^# {key}=(true|false)$")
-
+        origins = "CODEBUDDY2API_ADMIN_ORIGINS"
+        self.assertRegex((ROOT / "docker-compose.yml").read_text(), rf"(?m)^ +{origins}: *$")
+        self.assertRegex((ROOT / ".env.example").read_text(), rf"(?m)^# {origins}=https://")
     def test_docker_copies_and_allows_all_local_runtime_imports(self):
         files = docker_sources()
         self.assertTrue({"app/client_profiles.py", "app/site_routing.py", "app/trial_rewards.py"} <= files)

@@ -135,6 +135,25 @@ class EnvironmentConfigTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.start({'CODEBUDDY2API_MODEL_CAPABILITY_GUARD': 'invalid'})
 
+    def test_admin_allowed_origins_precedence_normalization_and_locking(self):
+        key = 'CODEBUDDY2API_ADMIN_ORIGINS'
+        self.assertEqual(self.start()[2]['admin_allowed_origins'], '')
+        _, items, config = self.start(saved={'admin_allowed_origins': 'saved.example.com'})
+        self.assertEqual(config['admin_allowed_origins'], 'https://saved.example.com')
+        self.assertEqual(items['admin_allowed_origins']['source'], 'management')
+        self.assertFalse(items['admin_allowed_origins']['locked'])
+        _, items, config = self.start({key: 'env.example.com, http://10.0.0.1:8787'},
+                                      saved={'admin_allowed_origins': 'saved.example.com'})
+        self.assertEqual(config['admin_allowed_origins'], 'https://env.example.com,http://10.0.0.1:8787')
+        self.assertEqual(items['admin_allowed_origins']['source'], 'environment')
+        self.assertTrue(items['admin_allowed_origins']['locked'])
+        _, items, config = self.start({key: 'env.example.com'}, cli=('--admin-allowed-origins', 'cli.example.com'),
+                                      saved={'admin_allowed_origins': 'saved.example.com'})
+        self.assertEqual(config['admin_allowed_origins'], 'https://cli.example.com')
+        self.assertEqual(items['admin_allowed_origins']['source'], 'cli')
+        with self.assertRaises(SystemExit):
+            self.start({key: 'ftp://example.com'})
+
 
     def test_request_context_mode_precedence_and_validation(self):
         _, items, config = self.start(saved={'request_context_mode': 'scoped'})
@@ -186,6 +205,7 @@ class EnvironmentConfigTests(unittest.TestCase):
                   'CODEBUDDY2API_UPSTREAM_KEEPALIVE': 'true', 'CODEBUDDY2API_MAX_INFLIGHT_PER_ACCOUNT': '2',
                   'CODEBUDDY2API_REQUEST_CONTEXT_MODE': 'scoped',
                   'CODEBUDDY2API_MODEL_CAPABILITY_GUARD': 'false',
+                  'CODEBUDDY2API_ADMIN_ORIGINS': 'https://chat.example.com',
                   'CODEBUDDY2API_KEEP_TOOL_METADATA': 'false', 'CODEBUDDY_IMPORT_DIR': '/data/auth/incoming'}
         service = self.compose(values)
         port = service['ports'][0]
@@ -200,7 +220,8 @@ class EnvironmentConfigTests(unittest.TestCase):
         service = self.compose({})
         for name in ('CODEBUDDY2API_KEEP_TOOL_METADATA', 'CODEBUDDY2API_FAILOVER_MAX', 'CODEBUDDY2API_RETRY_WRITE_TIMEOUT',
                      'CODEBUDDY2API_UPSTREAM_KEEPALIVE', 'CODEBUDDY2API_MAX_INFLIGHT_PER_ACCOUNT',
-                     'CODEBUDDY2API_REQUEST_CONTEXT_MODE', 'CODEBUDDY2API_MODEL_CAPABILITY_GUARD'):
+                     'CODEBUDDY2API_REQUEST_CONTEXT_MODE', 'CODEBUDDY2API_MODEL_CAPABILITY_GUARD',
+                     'CODEBUDDY2API_ADMIN_ORIGINS'):
             self.assertIsNone(service['environment'].get(name))
         self.assertEqual(service['ports'][0]['host_ip'], '127.0.0.1')
         self.assertEqual(service['environment']['CODEBUDDY_IMPORT_DIR'], '/data/auth/imports')

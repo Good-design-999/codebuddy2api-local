@@ -20,7 +20,21 @@ def error_response(status, message):
                         headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
 
-def same_origin(request):
+def origin_allowlist(value):
+    """Parse a normalized origin list into comparable (scheme, host, port) triples."""
+    triples = set()
+    for entry in str(value or "").split(","):
+        try:
+            parts = urlsplit(entry.strip())
+            port = parts.port
+        except ValueError:
+            continue
+        if parts.scheme in ("http", "https") and parts.hostname:
+            triples.add((parts.scheme, parts.hostname, port if port is not None else (443 if parts.scheme == "https" else 80)))
+    return frozenset(triples)
+
+
+def same_origin(request, allowed=()):
     origin = request.headers.get("origin")
     reference = origin
     if origin is None:
@@ -38,10 +52,13 @@ def same_origin(request):
         target = urlsplit(str(request.url))
         supplied_port = supplied.port if supplied.port is not None else (443 if supplied.scheme == "https" else 80)
         target_port = target.port if target.port is not None else (443 if target.scheme == "https" else 80)
-        return (supplied.scheme in ("http", "https") and supplied.username is None and supplied.password is None
-                and not supplied.fragment
-                and (origin is None or (not supplied.path and not supplied.query))
-                and (supplied.scheme, supplied.hostname, supplied_port) == (target.scheme, target.hostname, target_port))
+        clean = (supplied.scheme in ("http", "https") and supplied.username is None and supplied.password is None
+                 and not supplied.fragment and (origin is None or (not supplied.path and not supplied.query)))
+        if clean and (supplied.scheme, supplied.hostname, supplied_port) == (target.scheme, target.hostname, target_port):
+            return True
+        # Explicitly trusted origins survive proxies that rewrite the forwarded Host/scheme.
+        return (origin is not None and clean and not supplied.path and not supplied.query
+                and (supplied.scheme, supplied.hostname, supplied_port) in allowed)
     except ValueError:
         return False
 
@@ -70,6 +87,10 @@ class AdminAuth:
     def csrf_enabled(self):
         """Only an explicitly disabled startup option skips browser-origin protection."""
         return self.config.get("admin_csrf", True) is not False
+
+    def allowed_origins(self):
+        """Extra trusted browser origins from hot configuration."""
+        return origin_allowlist(self.config.get("admin_allowed_origins"))
 
     def enabled(self):
         with self.lock:
@@ -157,7 +178,7 @@ class AdminMiddleware:
         if (self.auth.csrf_enabled() and cookie and not public_session
                 and (method not in ("GET", "HEAD", "OPTIONS") or path == "/admin/oauth/poll")):
             supplied = request.headers.get("x-csrf-token", "")
-            if not same_origin(request) or not hmac.compare_digest(supplied.encode(), session["csrf_token"].encode()):
+            if not same_origin(request, self.auth.allowed_origins()) or not hmac.compare_digest(supplied.encode(), session["csrf_token"].encode()):
                 return await error_response(403, "Origin 或 CSRF 校验失败")(scope, receive, no_cache)
         scope.setdefault("state", {}).update(admin_identity=identity or sid, admin_cookie=cookie,
                                               admin_session=session)

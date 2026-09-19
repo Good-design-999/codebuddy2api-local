@@ -780,6 +780,38 @@ class CredentialPool:
             self._warn_storage("cooldown", durable)
             return {"changed_in_memory": changed, "durable": durable}
 
+    def reset_cooldowns_for(self, identity: str) -> dict:
+        """Lift every cooldown held by one account, addressed by its public identity.
+
+        Persisting cooldowns removed the old "restart the gateway to clear it" workaround, so an
+        operator needs a supported way back when a breaker or a 429 cooldown was recorded in
+        error, or when upstream has demonstrably recovered. The whole account is reset rather
+        than just its circuit breaker: a credential that is mid-429 is exactly the case an
+        operator is trying to unstick, and lifting only the breaker would leave it unusable.
+
+        This is a local state change. It never refreshes a token, contacts upstream, or queues
+        synchronization, so a subsequent genuine failure is free to arm the cooldown again.
+        """
+        with self._lock:
+            entry = next((e for e in self._entries if e.get("account_key") == identity), None)
+            if entry is None:
+                raise KeyError(identity)
+            now = time.time()
+            changed = entry["fail_until"] > now
+            entry["fail_until"] = 0.0
+            entry["last_error"] = None
+            for key in [k for k in self._model_fail if k[0] == entry["id"]]:
+                if self._model_fail[key] > now:
+                    changed = True
+                del self._model_fail[key]
+            # One durable write for the whole account, replacing any breaker and model rows. An
+            # account whose identity is incomplete still resets in memory, but owns no disk row.
+            durable = not self._durable_identity(entry)
+            if not durable:
+                durable = self._cooldowns.forget(entry["account_key"])["durable"]
+            self._warn_storage("cooldown", durable)
+            return {"changed_in_memory": changed, "durable": durable}
+
     def entries(self) -> list[dict]:
         """Return credential snapshots for account maintenance."""
         with self._lock:
@@ -2148,11 +2180,14 @@ async def admin_credential_action(identity: str, action: str, request: Request,
     from app.admin_api import _body
     try:
         body = await _body(request, 4096, allow_empty=True)
-        if body and (action != "travel" or set(body) != {"confirm_buddy", "agreement_revision"}
-                     or body["confirm_buddy"] is not True or not isinstance(body["agreement_revision"], str)):
-            raise ValueError()
     except ValueError:
-        raise HTTPException(400, "首领确认参数无效") from None
+        raise HTTPException(400, "请求体必须是有效 JSON 对象") from None
+    if body:
+        if action != "travel":
+            raise HTTPException(400, "该操作不接受请求体")
+        if (set(body) != {"confirm_buddy", "agreement_revision"}
+                or body["confirm_buddy"] is not True or not isinstance(body["agreement_revision"], str)):
+            raise HTTPException(400, "首领确认参数无效")
     return await run_in_threadpool(_admin_credential_action, action, identity,
                                   consent_revision=body.get("agreement_revision"))
 
@@ -3894,6 +3929,7 @@ def main():
         sys.stderr.write("   GET  /admin/credits           (积分/签到状态)\n")
         sys.stderr.write("   POST /admin/checkin           (仅签到，按日幂等)\n")
         sys.stderr.write("   POST /admin/sync              (同步余额、目录与用量，不签到)\n")
+        sys.stderr.write("   POST /admin/credentials/{id}/reset-cooldown  (清除该账号冷却，仅本地)\n")
         sys.stderr.write("   每日签到 + 快过期积分优先调度已启用\n")
     if args.api_key:
         sys.stderr.write("   鉴权已启用（API key 已设置）\n")

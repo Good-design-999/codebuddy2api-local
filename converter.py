@@ -52,6 +52,7 @@ from app import trial_rewards
 from app import buddy, checkin as checkin_service, model_policy, travel
 from app.credential_cooldowns import CredentialCooldowns
 from app.model_blocks import ModelBlocks
+from app.usage_snapshots import UsageSnapshots
 from app.client_hangup import ClientHungUp, await_or_hangup
 from app.observability import (AuditMiddleware, observe_recovery, observe_route,
                                observe_usage, observe_attempt, observe_failure,
@@ -1191,6 +1192,9 @@ class CredentialPool:
         identity = entry.get("account_key")
         if identity:
             self._cooldowns.forget(identity)
+        snapshots = CONFIG.get("usage_snapshots")
+        if snapshots is not None:
+            snapshots.forget(entry["id"])
 
     def first(self) -> CredentialManager | None:
         with self._lock:
@@ -1438,6 +1442,10 @@ def _sync_usage(pool, entries=None, expected_identity=None):
                                          "requests": usage["requests"],
                                          "partial": bool(usage.get("partial")),
                                          "fetched_at": time.time()}
+                snapshots = CONFIG.get("usage_snapshots")
+                if snapshots is not None and entry.get("account_key"):
+                    snapshots.store(entry["id"], entry["account_key"], site, usage,
+                                    partial=bool(usage.get("partial")))
             if not pool.apply_if_current(cm, generation, store):
                 stale.add(entry["id"])
         except Exception as error:
@@ -1452,6 +1460,14 @@ def _publish_usage_daily(pool, stale=()):
     accounts = CONFIG.get("usage_daily_accounts")
     if not isinstance(accounts, dict):
         accounts = {}
+    # Seed from the on-disk cache so the dashboard is not blank until the first refresh.
+    snapshots = CONFIG.get("usage_snapshots")
+    if snapshots is not None:
+        snapshots.drop_mismatched(pool)
+        for path, row in snapshots.accounts().items():
+            if path not in accounts:
+                accounts[path] = {key: value for key, value in row.items() if key != "identity"}
+        CONFIG["usage_daily_accounts"] = accounts
     enabled = {e["id"] for e in pool.entries() if model_policy.credential_enabled(CONFIG, e)}
     by_day, groups = {}, {}
     used, count = 0.0, 0
@@ -1500,6 +1516,8 @@ def _housekeep_once(pool: CredentialPool, ledger, *, pending_only=False):
     with _HOUSEKEEP_LOCK:
         pool._rescan()
         pool._cooldowns.prune()   # Drop expired deadlines so the table cannot grow without bound.
+        if CONFIG.get("usage_snapshots") is not None:
+            CONFIG["usage_snapshots"].prune()   # Cached usage older than the window is not shown.
         ids = pool.begin_sync(all_entries=not pending_only)
         failed = set()
         try:
@@ -1623,6 +1641,7 @@ CONFIG: dict = {"api_key": "", "cred": None, "log_path": None, "ledger": None,
                 "retry_write_timeout": False,  # Opt-in replay after incomplete writes
                 "usage_daily": None,     # Usage aggregated by date and model
                 "usage_daily_accounts": None,  # Independent per-account usage snapshots
+                "usage_snapshots": None,  # On-disk cache of the per-account snapshots
                 "credit_price_cny": None, "credit_price_usd": None, "usd_rate": None,
                 "desensitize": False, "no_compact": False, "keep_tool_metadata": False}  # None prices use module defaults.
 
@@ -3737,6 +3756,7 @@ def main():
     CONFIG["cred_pool"] = CredentialPool(files, scan=not files,
                                          blocks_path=managed_auth_dir() / "model-site-blocks.json",
                                          cooldowns_path=managed_auth_dir() / "credential-cooldowns.json")
+    CONFIG["usage_snapshots"] = UsageSnapshots(managed_auth_dir() / "usage-snapshots.json")
     CONFIG["cred"] = CONFIG["cred_pool"].first()
     CONFIG["account_catalogs"] = {}  # Disable static fallback before maintenance starts.
     if credits_mod is not None:

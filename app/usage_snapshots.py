@@ -51,6 +51,17 @@ def _number(value, *, low=None, high=None):
     return number
 
 
+def _valid_date(value):
+    """Accept a real calendar date; a shape-only match would allow 2026-02-31."""
+    if _DATE.fullmatch(value) is None:
+        return False
+    try:
+        time.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
+
+
 def _valid_identity(value):
     return isinstance(value, str) and _IDENTITY.fullmatch(value) is not None
 
@@ -129,7 +140,11 @@ class UsageSnapshots:
 
     @staticmethod
     def _valid_row(row):
-        """Return a normalized row, or None when any field is unusable."""
+        """Return a normalized row, or None when any field is unusable.
+
+        Malformed values are rejected rather than coerced: turning a bad credit figure into
+        zero would silently display a wrong number as if it were measured.
+        """
         if not _valid_identity(row["identity"]) or not _valid_site(row["site"]):
             return None
         total = _number(row["total_credits"], low=0.0, high=MAX_CREDITS)
@@ -137,12 +152,16 @@ class UsageSnapshots:
         fetched_at = _number(row["fetched_at"], low=0.0)
         if total is None or requests is None or fetched_at is None or type(row["partial"]) is not bool:
             return None
+        if requests != int(requests):        # A request count is a whole number.
+            return None
+        if fetched_at > time.time() + 86400:  # A snapshot cannot be fetched in the future.
+            return None
         by_day = row["by_day"]
         if not isinstance(by_day, dict) or len(by_day) > MAX_DAYS:
             return None
         days = {}
         for day, models in by_day.items():
-            if not isinstance(day, str) or not _DATE.fullmatch(day) or not isinstance(models, dict):
+            if not isinstance(day, str) or not _valid_date(day) or not isinstance(models, dict):
                 return None
             if len(models) > MAX_MODELS:
                 return None
@@ -158,27 +177,33 @@ class UsageSnapshots:
                 "partial": row["partial"], "fetched_at": fetched_at}
 
     def _serialize_locked(self):
-        """Build the payload, shedding the oldest snapshots until it fits MAX_BYTES."""
+        """Build the payload, shedding the oldest snapshots until it fits MAX_BYTES.
+
+        Returns the payload plus whether rows had to be shed, so a caller is not told its
+        snapshot was cached when that row was the one given up to satisfy the byte bound.
+        """
         accounts = dict(self._data)
+        shed = False
         while True:
             try:
                 content = json.dumps({"version": VERSION, "accounts": accounts},
                                      ensure_ascii=False, separators=(",", ":"),
                                      allow_nan=False).encode("utf-8")
             except (TypeError, ValueError):
-                return None
+                return None, shed
             if len(content) <= MAX_BYTES or not accounts:
-                return content
+                return content, shed
             ordered = sorted(accounts, key=lambda key: accounts[key].get("fetched_at") or 0.0)
             keep = max(0, int(len(ordered) * MAX_BYTES / len(content) * 0.9))
             for key in ordered[:max(1, len(ordered) - keep)]:
                 accounts.pop(key, None)
+                shed = True
 
     def _save_locked(self) -> bool:
-        """Atomically rewrite the cache; returns False when it was not durable."""
+        """Atomically rewrite the cache; returns False when the update was not fully durable."""
         if not self.path:
             return True
-        content = self._serialize_locked()
+        content, shed = self._serialize_locked()
         if content is None:
             self.last_error = "serialize"
             return False
@@ -203,8 +228,8 @@ class UsageSnapshots:
                     os.unlink(temporary)
                 except OSError:
                     pass
-        self.last_error = None
-        return True
+        self.last_error = "capacity" if shed else None
+        return not shed
 
     # -- reads / writes ----------------------------------------------------
 
@@ -216,15 +241,19 @@ class UsageSnapshots:
 
     def store(self, path, identity, site, usage, *, partial=False, now=None) -> bool:
         """Cache one account's usage snapshot; returns whether it is durable."""
-        now = time.time() if now is None else now
-        row = {"identity": identity, "site": site, "by_day": usage.get("by_day") or {},
-               "total_credits": usage.get("total_credits") or 0.0,
-               "requests": usage.get("requests") or 0, "partial": bool(partial), "fetched_at": now}
-        if self._valid_row(row) is None:
+        stamp = _number(time.time() if now is None else now, low=0.0)
+        if not isinstance(path, str) or not path or len(path) > 4096 or stamp is None:
+            return False
+        row = self._valid_row({"identity": identity, "site": site, "by_day": usage.get("by_day") or {},
+                               "total_credits": usage.get("total_credits") or 0.0,
+                               "requests": usage.get("requests") or 0, "partial": bool(partial),
+                               "fetched_at": stamp})
+        if row is None:
             return False
         with self._lock:
             if path not in self._data and len(self._data) >= MAX_ACCOUNTS:
                 self._evict_locked()
+            # Keep the validated copy so later caller mutation cannot corrupt the cache.
             self._data[path] = row
             return self._save_locked()
 

@@ -331,6 +331,8 @@ class CredentialManager:
             }
 
 
+STORAGE_WARN_INTERVAL = 300  # Rate limit for persistence-failure warnings
+USAGE_CACHE_MAX_AGE_S = 7 * 24 * 3600   # A cached usage snapshot older than this is not shown.
 STICKY_TTL = 30 * 60        # Idle session binding lifetime in seconds
 STICKY_MAX = 512            # Session binding capacity
 CRED_COOLDOWN = 300         # Credential cooldown in seconds
@@ -472,6 +474,7 @@ class CredentialPool:
         self._blocks = ModelBlocks(blocks_path, ttl_s=MODEL_SITE_BLOCK_S, max_ttl_s=MODEL_SITE_BLOCK_MAX_S)
         # Cooldowns outlive a restart so a backend that just refused is not retried immediately.
         self._cooldowns = CredentialCooldowns(cooldowns_path)
+        self._storage_warned = 0.0   # Rate limit for persistence-failure warnings
         self._rr = {None: 0, "cn": 0, "intl": 0}
         self._ledger = None              # Prefer credits expiring sooner.
         self._capacity = AccountCapacity()
@@ -522,9 +525,10 @@ class CredentialPool:
                         self._bind_entry(entry)
                         if reset or replaced:
                             entry.update(fail_until=0.0, keepalive_after=0.0)
-                        if reset:
-                            # An explicit reload re-evaluates auth now, so the persisted breaker is
-                            # lifted; model cooldowns describe upstream quota and are retained.
+                        if reset and not replaced:
+                            # An explicit reload re-evaluates auth for the same account, so the
+                            # persisted breaker is lifted; a replacement must keep the incoming
+                            # account's own breaker, which is hydrated just below.
                             self._forget_credential_cooldown(entry)
                         self._adopt_cooldowns(entry)
                         if entry.get("uid"):
@@ -672,8 +676,8 @@ class CredentialPool:
     def _adopt_cooldowns(self, entry):
         """Hydrate persisted cooldowns once per identity, so the in-memory table stays authoritative."""
         identity, profile = entry.get("account_key"), entry.get("profile")
-        if not identity or not profile:
-            return          # Adopt later, once this account's identity is known.
+        if not self._durable_identity(entry):
+            return          # Adopt later, once this account's identity is validated.
         if entry.get("cooldowns_adopted") == identity:
             return
         entry["cooldowns_adopted"] = identity
@@ -691,25 +695,47 @@ class CredentialPool:
             key = (entry["id"], model)
             self._model_fail[key] = max(self._model_fail.get(key, 0.0), until)
 
+    def _durable_identity(self, entry) -> bool:
+        """Whether this account's identity is complete enough to key durable state.
+
+        A hash is derived from the profile and UID, so an account with no UID still yields a
+        stable-looking hash shared by every other account in the same state. Durable rows
+        must therefore be keyed only when the identifying components are actually present.
+        """
+        return bool(entry.get("account_key") and entry.get("profile") and entry.get("uid"))
+
     def _remember_credential(self, entry, reason):
         """Mirror a credential circuit breaker to disk; returns whether it is durable."""
-        identity, profile = entry.get("account_key"), entry.get("profile")
-        if identity and profile:
-            return self._cooldowns.note_credential(identity, profile, entry["fail_until"], reason=reason)
-        return False
+        if not self._durable_identity(entry):
+            return False
+        durable = self._cooldowns.note_credential(entry["account_key"], entry["profile"],
+                                                 entry["fail_until"], reason=reason)
+        self._warn_storage("cooldown", durable)
+        return durable
 
     def _remember_model(self, entry, model, until):
         """Mirror a model cooldown to disk; returns whether it is durable."""
-        identity, profile = entry.get("account_key"), entry.get("profile")
-        if identity and profile:
-            return self._cooldowns.note_model(identity, profile, model, until)
-        return False
+        if not self._durable_identity(entry):
+            return False
+        durable = self._cooldowns.note_model(entry["account_key"], entry["profile"], model, until)
+        self._warn_storage("cooldown", durable)
+        return durable
+
+    def _warn_storage(self, label, durable):
+        """Report a persistence failure operationally, rate limited so a hot path cannot flood."""
+        if durable:
+            self._storage_warned = 0.0
+            return
+        now = time.time()
+        if now - getattr(self, "_storage_warned", 0.0) < STORAGE_WARN_INTERVAL:
+            return
+        self._storage_warned = now
+        _log(f"[cred] {label}持久化失败（{self._cooldowns.last_error}）；本次运行仍按内存态生效")
 
     def _forget_credential_cooldown(self, entry):
         """Lift a persisted breaker while keeping this account's model cooldowns."""
-        identity, profile = entry.get("account_key"), entry.get("profile")
-        if identity and profile:
-            self._cooldowns.clear_credential(identity, profile)
+        if self._durable_identity(entry):
+            self._cooldowns.clear_credential(entry["account_key"], entry["profile"])
 
     def cooldown_detail(self) -> list:
         """Return persisted cooldown rows for diagnostics."""
@@ -722,28 +748,32 @@ class CredentialPool:
                 "last_error": self._cooldowns.last_error, "rows": len(self._cooldowns.detail()),
                 "warning": "冷却持久化写入失败，本次运行仍按内存态生效。" if self._cooldowns.last_error else None}
 
-    def clear_cooldowns(self, cm, model: str | None = None) -> bool:
+    def clear_cooldowns(self, cm, model: str | None = None) -> dict:
         """Lift a circuit breaker or model cooldown after a confirmed recovery or admin reset.
 
         Persisting cooldowns removes the old "restart the gateway to clear it" workaround,
-        so an explicit reset has to be able to lift one both in memory and on disk.
+        so an explicit reset has to be able to lift one both in memory and on disk. The two
+        outcomes are reported separately: an in-memory reset that could not be written is
+        not a durable reset, and saying otherwise would hide a cooldown that comes back.
         """
         with self._lock:
             entry = next((e for e in self._entries if e["cm"] is cm), None)
             if entry is None:
-                return False
-            identity, profile = entry.get("account_key"), entry.get("profile")
+                return {"changed_in_memory": False, "durable": False}
+            durable = self._durable_identity(entry)
             if model:
                 routed_model = _upstream_model(model, self._entry_profile(entry))
-                removed = self._model_fail.pop((entry["id"], routed_model), None) is not None
-                if identity and profile:
-                    removed = self._cooldowns.clear_model(identity, profile, routed_model) or removed
-                return removed
+                changed = self._model_fail.pop((entry["id"], routed_model), None) is not None
+                if durable:
+                    cleared = self._cooldowns.clear_model(entry["account_key"], entry["profile"], routed_model)
+                    durable = durable and (cleared or not changed)
+                return {"changed_in_memory": changed, "durable": durable}
+            changed = entry["fail_until"] > time.time()
             entry["fail_until"] = 0.0
             entry["last_error"] = None
-            if identity and profile:
-                self._cooldowns.clear_credential(identity, profile)
-            return True
+            if durable:
+                durable = self._cooldowns.clear_credential(entry["account_key"], entry["profile"])
+            return {"changed_in_memory": changed, "durable": durable}
 
     def entries(self) -> list[dict]:
         """Return credential snapshots for account maintenance."""
@@ -1188,7 +1218,11 @@ class CredentialPool:
             return True
 
     def forget_cooldowns(self, entry):
-        """Drop persisted cooldowns for a deleted credential so the table stays bounded."""
+        """Drop persisted state for a credential that no longer exists.
+
+        The two stores keep separate lifecycles, so this only orchestrates them; neither
+        store needs to know about the other.
+        """
         identity = entry.get("account_key")
         if identity:
             self._cooldowns.forget(identity)
@@ -1437,13 +1471,15 @@ def _sync_usage(pool, entries=None, expected_identity=None):
             usage = credits_mod.fetch_request_usage(_bearer_token(headers), uid=headers.get("X-User-Id", ""),
                                                     domain=headers.get("X-Domain", ""))
             def store():
-                accounts[entry["id"]] = {"site": site, "by_day": usage["by_day"],
+                accounts[entry["id"]] = {"identity": entry.get("account_key"), "site": site,
+                                         "by_day": usage["by_day"],
                                          "total_credits": round(usage["total_credits"], 2),
                                          "requests": usage["requests"],
                                          "partial": bool(usage.get("partial")),
                                          "fetched_at": time.time()}
                 snapshots = CONFIG.get("usage_snapshots")
-                if snapshots is not None and entry.get("account_key"):
+                if snapshots is not None and entry.get("account_key") and entry.get("uid"):
+                    # Only a validated identity may key durable state.
                     snapshots.store(entry["id"], entry["account_key"], site, usage,
                                     partial=bool(usage.get("partial")))
             if not pool.apply_if_current(cm, generation, store):
@@ -1455,6 +1491,45 @@ def _sync_usage(pool, entries=None, expected_identity=None):
     return stale & target_ids
 
 
+def _usage_row_expired(snap) -> bool:
+    """Whether a cached row is too old to keep showing."""
+    return time.time() - float(snap.get("fetched_at") or 0.0) > USAGE_CACHE_MAX_AGE_S
+
+
+def _adopt_cached_usage(pool, snapshots, accounts):
+    """Seed the aggregate from the cache, keeping only rows that still belong to their account.
+
+    Ownership is checked here, at the moment of use, rather than only when the cache was
+    written: a path can be reused between restarts, and a row hydrated on an earlier pass
+    would otherwise keep showing the previous account's usage indefinitely.
+    """
+    cached = snapshots.accounts()
+    if not cached and not accounts:
+        return              # Nothing cached and nothing live: leave the pool untouched.
+    owners = {entry["id"]: entry.get("account_key") for entry in pool.entries()}
+    # Drop any row whose recorded owner no longer matches the account at that path. This covers
+    # rows hydrated by an earlier pass as well as live rows, so a reused path cannot keep
+    # displaying the previous account's usage.
+    for path in list(accounts):
+        if owners.get(path) != accounts[path].get("identity"):
+            accounts.pop(path, None)
+    for path, row in cached.items():
+        identity = row.get("identity")
+        if owners.get(path) != identity:
+            snapshots.forget(path)      # The path moved on; the cached row is not ours to show.
+            continue
+        if _usage_row_expired(row):
+            snapshots.forget(path)
+            continue
+        # A live snapshot from this run always wins; the cache only fills a gap.
+        if path in accounts:
+            continue
+        # A restored snapshot is stale until a refresh confirms it; clearing that is per account.
+        accounts[path] = dict(row)
+        accounts[path]["stale"] = True
+    CONFIG["usage_daily_accounts"] = accounts
+
+
 def _publish_usage_daily(pool, stale=()):
     """Aggregate enabled accounts' usage, retaining failed snapshots with explicit staleness."""
     accounts = CONFIG.get("usage_daily_accounts")
@@ -1463,11 +1538,7 @@ def _publish_usage_daily(pool, stale=()):
     # Seed from the on-disk cache so the dashboard is not blank until the first refresh.
     snapshots = CONFIG.get("usage_snapshots")
     if snapshots is not None:
-        snapshots.drop_mismatched(pool)
-        for path, row in snapshots.accounts().items():
-            if path not in accounts:
-                accounts[path] = {key: value for key, value in row.items() if key != "identity"}
-        CONFIG["usage_daily_accounts"] = accounts
+        _adopt_cached_usage(pool, snapshots, accounts)
     enabled = {e["id"] for e in pool.entries() if model_policy.credential_enabled(CONFIG, e)}
     by_day, groups = {}, {}
     used, count = 0.0, 0
@@ -1476,6 +1547,8 @@ def _publish_usage_daily(pool, stale=()):
     stale_out = []
     for cred_id, snap in accounts.items():
         if cred_id not in enabled:
+            continue
+        if _usage_row_expired(snap):
             continue
         site = snap.get("site") or "domestic"
         group = groups.setdefault(site, {"by_day": {}, "total_credits": 0.0, "requests": 0})
@@ -1490,7 +1563,7 @@ def _publish_usage_daily(pool, stale=()):
         used += float(snap.get("total_credits") or 0)
         count += int(snap.get("requests") or 0)
         newest = max(newest, float(snap.get("fetched_at") or 0))
-        if snap.get("partial"):
+        if snap.get("partial") or snap.get("stale"):
             partial = True
     # Failed enabled accounts must remain visible even without a prior snapshot.
     for cred_id in stale:
@@ -3772,6 +3845,11 @@ def main():
     if credits_mod is not None:
         threading.Thread(target=_housekeeper_loop, args=(CONFIG["cred_pool"], ledger),
                          daemon=True, name="cred-housekeeper").start()
+    # Publish cached usage before serving so the dashboard is populated from the first request
+    # instead of waiting for the first maintenance pass. This runs after the pool is real, and
+    # stays a no-op when nothing is cached, so it cannot disturb an empty deployment.
+    if CONFIG["usage_snapshots"].detail():
+        _publish_usage_daily(CONFIG["cred_pool"])
 
     if not args.skip_check:
         preflight()

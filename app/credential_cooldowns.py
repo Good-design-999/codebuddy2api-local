@@ -165,31 +165,38 @@ class CredentialCooldowns:
     def _serialize_locked(self):
         """Build the exact payload to write, shedding rows until it fits MAX_BYTES.
 
-        Rows are shed in one proportional step (then verified), so the byte bound can never
-        make the file unreadable while staying cheap even at full capacity.
+        Returns the payload plus whether rows had to be shed, because a caller that asked to
+        record a cooldown must not be told its write was durable when that row was the one
+        given up to satisfy the byte bound.
         """
         accounts = dict(self._data)
+        shed = False
         while True:
             try:
                 content = json.dumps({"version": VERSION, "accounts": accounts},
                                      ensure_ascii=False, separators=(",", ":"),
                                      allow_nan=False).encode("utf-8")
             except (TypeError, ValueError):
-                return None
+                return None, shed
             if len(content) <= MAX_BYTES or not accounts:
-                return content
+                return content, shed
             # Shed the accounts nearest expiry first, in one proportional step.
             ordered = sorted(accounts, key=lambda key: max(
                 [float(accounts[key].get("fail_until") or 0.0)] + list(accounts[key]["models"].values())))
             keep = max(0, int(len(ordered) * MAX_BYTES / len(content) * 0.9))
             for key in ordered[:max(1, len(ordered) - keep)]:
                 accounts.pop(key, None)
+                shed = True
 
     def _save_locked(self) -> bool:
-        """Atomically rewrite the table; returns False when it was not durable."""
+        """Atomically rewrite the table; returns False when the update was not fully durable.
+
+        The payload is written even when rows had to be shed, so the file stays bounded and
+        readable; the False return tells the caller its update may not have survived.
+        """
         if not self.path:
             return True
-        content = self._serialize_locked()
+        content, shed = self._serialize_locked()
         if content is None:
             self.last_error = "serialize"
             return False
@@ -214,8 +221,8 @@ class CredentialCooldowns:
                     os.unlink(temporary)
                 except OSError:
                     pass
-        self.last_error = None
-        return True
+        self.last_error = "capacity" if shed else None
+        return not shed
 
     # -- table helpers -----------------------------------------------------
 
@@ -266,24 +273,30 @@ class CredentialCooldowns:
 
     def note_credential(self, identity, profile, until, reason="", now=None) -> bool:
         """Record a credential-wide circuit-breaker deadline; returns whether it is durable."""
-        now = time.time() if now is None else now
+        deadline = _number(until)
+        stamp = _number(time.time() if now is None else now)
+        if deadline is None or stamp is None:
+            return False        # Reject before mutating anything.
         with self._lock:
+            self._expire_locked(stamp)   # Capacity must reflect live rows only.
             row = self._ensure_locked(identity, profile)
             if row is None:
                 return False
             # Never shorten a live deadline, and never extend past the ceiling.
             row["fail_until"] = max(float(row.get("fail_until") or 0.0),
-                                    min(float(until), now + self.auth_ceiling_s))
+                                    min(deadline, stamp + self.auth_ceiling_s))
             row["reason"] = _text(reason)
-            row["failed_at"] = float(now)
+            row["failed_at"] = stamp
             return self._save_locked()
 
     def note_model(self, identity, profile, model, until, now=None) -> bool:
         """Record a per-model 429 deadline; returns whether it is durable."""
-        if not _valid_token(model):
-            return False
-        now = time.time() if now is None else now
+        deadline = _number(until)
+        stamp = _number(time.time() if now is None else now)
+        if not _valid_token(model) or deadline is None or stamp is None:
+            return False        # Reject before mutating anything.
         with self._lock:
+            self._expire_locked(stamp)   # Capacity must reflect live rows only.
             row = self._ensure_locked(identity, profile)
             if row is None:
                 return False
@@ -292,8 +305,17 @@ class CredentialCooldowns:
                 # Evict the model cooldown nearest expiry rather than refusing the new one.
                 models.pop(min(models, key=lambda name: models[name]), None)
             models[model] = max(float(models.get(model) or 0.0),
-                                min(float(until), now + self.model_ceiling_s))
+                                min(deadline, stamp + self.model_ceiling_s))
             return self._save_locked()
+
+    def _expire_locked(self, now):
+        """Drop expired deadlines so capacity reflects live rows only."""
+        for identity in list(self._data):
+            row = self._data[identity]
+            if row.get("fail_until") and float(row["fail_until"]) <= now:
+                row["fail_until"] = 0.0
+            row["models"] = {m: u for m, u in row["models"].items() if u > now}
+            self._drop_locked(identity, row)
 
     def clear_credential(self, identity, profile=None) -> bool:
         """Drop a circuit breaker; returns whether the change is durable."""

@@ -87,6 +87,12 @@ class UsageSnapshotStoreTests(unittest.TestCase):
                                         "accounts": {PATH: self.row(partial=1)}}).encode(),
             "bad date": json.dumps({"version": VERSION,
                                     "accounts": {PATH: self.row(by_day={"19-09-2026": {"m": 1.0}})}}).encode(),
+            "impossible date": json.dumps({"version": VERSION,
+                                           "accounts": {PATH: self.row(by_day={"2026-02-31": {"m": 1.0}})}}).encode(),
+            "fractional requests": json.dumps({"version": VERSION,
+                                               "accounts": {PATH: self.row(requests=1.5)}}).encode(),
+            "future timestamp": json.dumps({"version": VERSION,
+                                            "accounts": {PATH: self.row(fetched_at=time.time() + 10 * 86400)}}).encode(),
             "oversized file": b"x" * (MAX_BYTES + 1),
         }
         for label, content in payloads.items():
@@ -107,17 +113,19 @@ class UsageSnapshotStoreTests(unittest.TestCase):
     def test_the_writer_never_produces_a_file_the_reader_rejects(self):
         """A rejected cache file loses every snapshot it held, not just the offending row."""
         store = UsageSnapshots(self.path)
+        # October has 31 days, matching MAX_DAYS, so the fixtures are real calendar dates.
+        days = [f"2026-10-{day:02d}" for day in range(1, MAX_DAYS + 1)]
         with store._lock:
             for index in range(MAX_ACCOUNTS):
                 store._data[f"/auth/{index}.info"] = {
                     "identity": f"{index:064x}", "site": "domestic",
-                    "by_day": {f"2026-09-{day:02d}": {f"model-name-{model:03d}": 1.5
-                                                      for model in range(MAX_MODELS)}
-                               for day in range(1, MAX_DAYS + 1)},
+                    "by_day": {day: {f"model-name-{model:03d}": 1.5 for model in range(MAX_MODELS)}
+                               for day in days},
                     "total_credits": 1.5, "requests": 1, "partial": False,
-                    "fetched_at": time.time() + index}
-            content = store._serialize_locked()
+                    "fetched_at": time.time() - index}
+            content, shed = store._serialize_locked()
             self.assertLessEqual(len(content), MAX_BYTES)
+            self.assertTrue(shed)                   # Capacity really did force shedding.
             self.path.write_bytes(content)
         self.assertGreater(len(UsageSnapshots(self.path).accounts()), 0)
 
@@ -239,7 +247,8 @@ class UsageSnapshotIntegrationTests(unittest.TestCase):
         snapshots.store(entry["id"], entry["account_key"], "domestic",
                         {"by_day": {}, "total_credits": 1.0, "requests": 1, "partial": False})
         converter.CONFIG["usage_daily_accounts"] = {entry["id"]: {
-            "site": "domestic", "by_day": {}, "total_credits": 99.0, "requests": 99,
+            "identity": entry["account_key"], "site": "domestic", "by_day": {},
+            "total_credits": 99.0, "requests": 99,
             "partial": False, "fetched_at": time.time()}}
         converter._publish_usage_daily(pool)
         self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 99.0)
@@ -263,6 +272,57 @@ class UsageSnapshotIntegrationTests(unittest.TestCase):
         with patch("app.usage_snapshots.os.replace", side_effect=OSError("read-only")):
             converter._publish_usage_daily(pool)      # Must not raise.
         self.assertIsNotNone(converter.CONFIG["usage_daily"])
+
+    def test_startup_publication_hydrates_from_the_cache(self):
+        """The startup path must populate usage without waiting for a maintenance pass."""
+        path = self.credential()
+        pool = converter.CredentialPool([path], blocks_path=self.root / "blocks.json")
+        entry = pool._entries[0]
+        snapshots = UsageSnapshots(self.path)
+        converter.CONFIG["usage_snapshots"] = snapshots
+        snapshots.store(entry["id"], entry["account_key"], "domestic",
+                        {"by_day": {"2026-09-19": {"m": 2.0}}, "total_credits": 2.0,
+                         "requests": 2, "partial": False})
+        # Exactly what startup does, with a cold in-memory aggregate.
+        converter.CONFIG["usage_daily_accounts"] = None
+        converter._publish_usage_daily(pool)
+        self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 2.0)
+        # A restored snapshot is stale until a refresh confirms it.
+        self.assertTrue(converter.CONFIG["usage_daily_accounts"][entry["id"]]["stale"])
+        self.assertTrue(converter.CONFIG["usage_daily"]["partial"])
+
+    def test_a_stale_restored_row_stops_being_shown_once_it_ages_out(self):
+        path = self.credential()
+        pool = converter.CredentialPool([path], blocks_path=self.root / "blocks.json")
+        entry = pool._entries[0]
+        snapshots = UsageSnapshots(self.path)
+        converter.CONFIG["usage_snapshots"] = snapshots
+        snapshots.store(entry["id"], entry["account_key"], "domestic",
+                        {"by_day": {}, "total_credits": 5.0, "requests": 1, "partial": False})
+        with snapshots._lock:
+            snapshots._data[entry["id"]]["fetched_at"] = time.time() - converter.USAGE_CACHE_MAX_AGE_S - 60
+        converter.CONFIG["usage_daily_accounts"] = None
+        converter._publish_usage_daily(pool)
+        self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 0.0)
+        self.assertEqual(snapshots.accounts(), {})          # The aged row is dropped, not kept.
+
+    def test_hydrated_rows_are_rechecked_against_current_ownership(self):
+        """A row hydrated on an earlier pass must not survive a later path reuse."""
+        path = self.credential(name="shared.info", uid="first-uid")
+        first = converter.CredentialPool([path], blocks_path=self.root / "blocks.json")
+        snapshots = UsageSnapshots(self.path)
+        converter.CONFIG["usage_snapshots"] = snapshots
+        snapshots.store(first._entries[0]["id"], first._entries[0]["account_key"], "domestic",
+                        {"by_day": {}, "total_credits": 7.0, "requests": 1, "partial": False})
+        # Hydrate as a live row, as an earlier publication would have.
+        converter.CONFIG["usage_daily_accounts"] = None
+        converter._publish_usage_daily(first)
+        self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 7.0)
+        # The path is then reused by another account.
+        self.credential(name="shared.info", uid="second-uid")
+        replacement = converter.CredentialPool([path], blocks_path=self.root / "blocks.json")
+        converter._publish_usage_daily(replacement)
+        self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 0.0)
 
 
 if __name__ == "__main__":

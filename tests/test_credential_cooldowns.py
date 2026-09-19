@@ -76,8 +76,9 @@ class CooldownStoreTests(unittest.TestCase):
                                          "reason": "x" * 256, "failed_at": now,
                                          "models": {f"model-name-{model:03d}": now + 600
                                                     for model in range(MAX_MODELS)}}
-            content = store._serialize_locked()
+            content, shed = store._serialize_locked()
             self.assertLessEqual(len(content), MAX_BYTES)
+            self.assertTrue(shed)                   # Capacity really did force shedding.
             self.path.write_bytes(content)
         restored = CredentialCooldowns(self.path)
         self.assertGreater(len(restored.detail()), 0)          # The reader still accepts it.
@@ -113,10 +114,34 @@ class CooldownStoreTests(unittest.TestCase):
 
     def test_prune_removes_dead_rows_and_keeps_live_ones(self):
         store = CredentialCooldowns(self.path)
-        store.note_credential(IDENTITY, PROFILE, time.time() - 1)
         store.note_model(IDENTITY, PROFILE, "live-model", time.time() + 600)
+        with store._lock:                      # Write an already-expired breaker directly.
+            store._data[IDENTITY]["fail_until"] = time.time() - 1
         self.assertTrue(store.prune())
         self.assertEqual(set(store.restore(IDENTITY, PROFILE)["models"]), {"live-model"})
+        self.assertEqual(store.credential_until(IDENTITY, PROFILE), 0.0)
+
+    def test_a_full_table_reports_shedding_instead_of_claiming_success(self):
+        """A caller must not be told its cooldown is durable when it was shed for capacity."""
+        now = time.time()
+        store = CredentialCooldowns(self.path)
+        with store._lock:
+            for index in range(MAX_ACCOUNTS):
+                store._data[f"{index:064x}"] = {"profile": PROFILE, "fail_until": now + 300,
+                                                "reason": "x" * 256, "failed_at": now,
+                                                "models": {f"model-name-{model:03d}": now + 600
+                                                           for model in range(MAX_MODELS)}}
+        self.assertFalse(store.note_model("f" * 64, PROFILE, "new-model", now + 600))
+        self.assertEqual(store.last_error, "capacity")
+
+    def test_invalid_deadlines_are_rejected_without_raising(self):
+        store = CredentialCooldowns(self.path)
+        for label, until in (("huge integer", 10 ** 400), ("nan", float("nan")), ("none", None),
+                             ("string", "abc"), ("infinity", float("inf"))):
+            with self.subTest(until=label):
+                self.assertFalse(store.note_credential(IDENTITY, PROFILE, until))
+                self.assertFalse(store.note_model(IDENTITY, PROFILE, MODEL, until))
+        self.assertEqual(store.detail(), [])
 
     def test_untrusted_snapshots_are_rejected_wholesale(self):
         payloads = {
@@ -308,6 +333,65 @@ class PoolCooldownPersistenceTests(unittest.TestCase):
         self.assertEqual(replacement["fail_until"], 0.0)
         self.assertEqual(second._model_fail, {})
         self.assertTrue(second._model_healthy(replacement, MODEL))
+
+    def test_in_process_replacement_keeps_the_incoming_accounts_own_breaker(self):
+        """The same replacement, but through reload() on one live pool.
+
+        This is the path the gateway actually takes when a credential file changes on disk,
+        and it is where an explicit reset must not wipe the *incoming* account's breaker.
+        """
+        shared = self.credential(name="shared.info", uid="first-uid")
+        incoming = self.credential(name="incoming.info", uid="second-uid")
+        # The incoming account's breaker is already on disk, as it would be after a restart.
+        seed = self.pool(incoming)
+        seed.cooldown(seed._entries[0]["cm"], reason="backend HTTP 403")
+        identity = seed._entries[0]["account_key"]
+
+        pool = self.pool(shared, incoming)
+        self.assertNotEqual(pool._entries[0]["account_key"], identity)
+        # Point the shared path at the incoming account and reload in place.
+        self.credential(name="shared.info", uid="second-uid")
+        pool.reload([shared], reset=True)
+        entry = next(e for e in pool._entries if Path(e["id"]).name == "shared.info")
+        self.assertEqual(entry["account_key"], identity)
+        self.assertGreater(entry["fail_until"], time.time())       # B's breaker survived.
+        self.assertEqual(entry["last_error"], "backend HTTP 403")   # Not A's reason.
+        self.assertFalse(pool._healthy(entry))
+
+    def test_an_account_without_a_uid_never_keys_durable_state(self):
+        """An empty UID still hashes, so every such account would share one identity."""
+        path = self.root / "anonymous.info"
+        now = time.time()
+        path.write_text(json.dumps({"account": {}, "auth": {
+            "accessToken": "synthetic-token", "refreshToken": "synthetic-refresh",
+            "domain": "www.codebuddy.cn", "expiresAt": (now + 86400) * 1000,
+            "lastRefreshTime": now * 1000}}), encoding="utf-8")
+        pool = self.pool(path)
+        entry = pool._entries[0]
+        self.assertFalse(pool._durable_identity(entry))
+        pool.cooldown(entry["cm"], reason="backend HTTP 401")
+        self.assertFalse(pool._healthy(entry))                     # Still enforced in memory.
+        self.assertEqual(pool.cooldown_detail(), [])               # But never written to disk.
+
+    def test_clear_cooldowns_reports_memory_and_durable_separately(self):
+        pool = self.pool(self.credential())
+        entry = pool._entries[0]
+        pool.cooldown(entry["cm"], reason="backend HTTP 401")
+        with patch("app.credential_cooldowns.os.replace", side_effect=OSError("read-only")):
+            outcome = pool.clear_cooldowns(entry["cm"])
+        self.assertTrue(outcome["changed_in_memory"])              # The runtime view is reset.
+        self.assertFalse(outcome["durable"])                       # But it is not durable.
+        self.assertTrue(pool._healthy(entry))
+
+    def test_a_write_failure_is_reported_operationally_once_per_interval(self):
+        pool = self.pool(self.credential())
+        entry = pool._entries[0]
+        with patch("app.credential_cooldowns.os.replace", side_effect=OSError("read-only")):
+            for _ in range(3):
+                pool.cooldown(entry["cm"], reason="backend HTTP 401")
+        warnings = [call for call in converter._log.call_args_list
+                    if "持久化失败" in str(call.args[0] if call.args else "")]
+        self.assertEqual(len(warnings), 1)                          # Rate limited, not per failure.
 
     def test_a_replacement_inherits_only_its_own_persisted_cooldowns(self):
         old = self.credential(name="shared.info", uid="first-uid")

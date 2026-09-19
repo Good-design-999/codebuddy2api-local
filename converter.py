@@ -1523,9 +1523,12 @@ def _sync_usage(pool, entries=None, expected_identity=None):
                                          "fetched_at": time.time()}
                 snapshots = CONFIG.get("usage_snapshots")
                 if snapshots is not None and entry.get("account_key") and entry.get("uid"):
-                    # Only a validated identity may key durable state.
+                    # Only a validated identity may key durable state. An absent flag defaults to
+                    # False, but a present value is passed through raw so the store's own strict
+                    # validator governs: coercing it here with bool() would mask a malformed value
+                    # and persist it as a legitimate flag.
                     snapshots.store(entry["id"], entry["account_key"], site, usage,
-                                    partial=bool(usage.get("partial")))
+                                    partial=usage.get("partial", False))
             if not pool.apply_if_current(cm, generation, store):
                 stale.add(entry["id"])
         except Exception as error:

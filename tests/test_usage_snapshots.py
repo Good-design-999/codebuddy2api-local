@@ -374,6 +374,30 @@ class UsageSnapshotIntegrationTests(unittest.TestCase):
         self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 3.0)
         self.assertNotIn("stale_accounts", converter.CONFIG["usage_daily"])
 
+    def test_a_malformed_partial_flag_is_rejected_not_coerced(self):
+        """A non-boolean partial must never be masked into a legitimate-looking flag.
+
+        bool("false") is True, so coercing before the store sees the value would persist a
+        wrong completeness flag for durable state. The raw value is passed through instead.
+        """
+        path = self.credential()
+        pool = converter.CredentialPool([path], blocks_path=self.root / "blocks.json")
+        snapshots = UsageSnapshots(self.path)
+        converter.CONFIG["usage_snapshots"] = snapshots
+        converter.CONFIG["usage_daily_accounts"] = None
+        for malformed in ("false", "true", 1, 0, None, [], {}):
+            with self.subTest(partial=malformed):
+                snapshots._data.clear()
+                self.path.unlink(missing_ok=True)
+                usage = {"by_day": {"2026-09-19": {"m": 2.0}}, "total_credits": 2.0,
+                         "requests": 1, "partial": malformed}
+                with patch.object(converter.credits_mod, "fetch_request_usage", return_value=usage):
+                    converter._sync_usage(pool)
+                # Nothing durable was written for this account...
+                self.assertEqual(snapshots.accounts(), {}, malformed)
+                # ...while the live dashboard row still reports the fetched figures.
+                self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 2.0)
+
     def test_a_real_sync_persists_and_survives_a_restart(self):
         """The same path with a healthy writer must leave a restorable cache behind."""
         path = self.credential()

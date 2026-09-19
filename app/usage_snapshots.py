@@ -129,7 +129,9 @@ class UsageSnapshots:
             return
         restored: dict[str, dict] = {}
         for path, row in accounts.items():
-            if not isinstance(path, str) or not isinstance(row, dict) or set(row) != _FIELDS:
+            if not isinstance(path, str) or not path or len(path) > 4096:
+                return
+            if not isinstance(row, dict) or set(row) != _FIELDS:
                 return
             clean = self._valid_row(row)
             if clean is None:
@@ -240,14 +242,21 @@ class UsageSnapshots:
                     for path, row in self._data.items()}
 
     def store(self, path, identity, site, usage, *, partial=False, now=None) -> bool:
-        """Cache one account's usage snapshot; returns whether it is durable."""
+        """Cache one account's usage snapshot; returns whether it is durable.
+
+        Malformed input is rejected rather than normalized: turning a missing or bad field
+        into a plausible zero would present unmeasured data as if it had been measured.
+        """
         stamp = _number(time.time() if now is None else now, low=0.0)
         if not isinstance(path, str) or not path or len(path) > 4096 or stamp is None:
             return False
-        row = self._valid_row({"identity": identity, "site": site, "by_day": usage.get("by_day") or {},
-                               "total_credits": usage.get("total_credits") or 0.0,
-                               "requests": usage.get("requests") or 0, "partial": bool(partial),
-                               "fetched_at": stamp})
+        if not isinstance(usage, dict) or type(partial) is not bool:
+            return False
+        row = self._valid_row({"identity": identity, "site": site,
+                               "by_day": usage.get("by_day"),
+                               "total_credits": usage.get("total_credits"),
+                               "requests": usage.get("requests"),
+                               "partial": partial, "fetched_at": stamp})
         if row is None:
             return False
         with self._lock:

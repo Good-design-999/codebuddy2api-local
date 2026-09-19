@@ -517,7 +517,7 @@ class CredentialPool:
                             self._model_fail = {key: until for key, until in self._model_fail.items() if key[0] != cid}
                             self._sticky = OrderedDict((key, value) for key, value in self._sticky.items() if value[0] != cid)
                             # The path now belongs to another account; its cooldowns must not carry over.
-                            self.forget_cooldowns(entry)
+                            self.forget_credential_state(entry)
                         if entry.get("uid"):
                             have_uids.pop(old_identity, None)
                         entry.update(uid=summary.get("uid"), profile=summary["profile"], site=summary["site"],
@@ -635,7 +635,7 @@ class CredentialPool:
             for entry in removed:
                 if self._ledger is not None:
                     self._ledger.remove(entry["id"])
-                self.forget_cooldowns(entry)
+                self.forget_credential_state(entry)
             self._entries = [e for e in self._entries if e not in removed]
             if len(self._entries) != before:
                 ids = {e["id"] for e in self._entries}
@@ -760,19 +760,21 @@ class CredentialPool:
             entry = next((e for e in self._entries if e["cm"] is cm), None)
             if entry is None:
                 return {"changed_in_memory": False, "durable": False}
-            durable = self._durable_identity(entry)
+            if not self._durable_identity(entry):
+                return {"changed_in_memory": False, "durable": False}
             if model:
                 routed_model = _upstream_model(model, self._entry_profile(entry))
                 changed = self._model_fail.pop((entry["id"], routed_model), None) is not None
-                if durable:
-                    cleared = self._cooldowns.clear_model(entry["account_key"], entry["profile"], routed_model)
-                    durable = durable and (cleared or not changed)
-                return {"changed_in_memory": changed, "durable": durable}
+                # Report what the store actually did: "nothing changed in memory" says nothing
+                # about whether a stale row is still on disk.
+                cleared = self._cooldowns.clear_model(entry["account_key"], entry["profile"], routed_model)
+                self._warn_storage("cooldown", cleared)
+                return {"changed_in_memory": changed, "durable": cleared}
             changed = entry["fail_until"] > time.time()
             entry["fail_until"] = 0.0
             entry["last_error"] = None
-            if durable:
-                durable = self._cooldowns.clear_credential(entry["account_key"], entry["profile"])
+            durable = self._cooldowns.clear_credential(entry["account_key"], entry["profile"])
+            self._warn_storage("cooldown", durable)
             return {"changed_in_memory": changed, "durable": durable}
 
     def entries(self) -> list[dict]:
@@ -1218,17 +1220,24 @@ class CredentialPool:
             return True
 
     def forget_cooldowns(self, entry):
-        """Drop persisted state for a credential that no longer exists.
-
-        The two stores keep separate lifecycles, so this only orchestrates them; neither
-        store needs to know about the other.
-        """
+        """Drop persisted cooldowns for a credential that no longer exists."""
         identity = entry.get("account_key")
         if identity:
-            self._cooldowns.forget(identity)
+            self._warn_storage("cooldown", self._cooldowns.forget(identity))
+
+    def forget_usage(self, entry):
+        """Drop a deleted credential's cached usage, in the store and the live aggregate."""
         snapshots = CONFIG.get("usage_snapshots")
         if snapshots is not None:
             snapshots.forget(entry["id"])
+        accounts = CONFIG.get("usage_daily_accounts")
+        if isinstance(accounts, dict):
+            accounts.pop(entry["id"], None)
+
+    def forget_credential_state(self, entry):
+        """Run both independent cleanups for a credential that is gone or replaced."""
+        self.forget_cooldowns(entry)
+        self.forget_usage(entry)
 
     def first(self) -> CredentialManager | None:
         with self._lock:
@@ -1542,13 +1551,15 @@ def _publish_usage_daily(pool, stale=()):
     enabled = {e["id"] for e in pool.entries() if model_policy.credential_enabled(CONFIG, e)}
     by_day, groups = {}, {}
     used, count = 0.0, 0
-    partial = False
+    partial = False          # Upstream paging hid additional usage for some account.
+    stale_out = set()        # Accounts whose displayed figures are not from this run.
     newest = 0.0
-    stale_out = []
-    for cred_id, snap in accounts.items():
+    for cred_id in list(accounts):
+        snap = accounts[cred_id]
         if cred_id not in enabled:
             continue
         if _usage_row_expired(snap):
+            accounts.pop(cred_id, None)      # Drop it from the live map, not just from this sum.
             continue
         site = snap.get("site") or "domestic"
         group = groups.setdefault(site, {"by_day": {}, "total_credits": 0.0, "requests": 0})
@@ -1563,13 +1574,17 @@ def _publish_usage_daily(pool, stale=()):
         used += float(snap.get("total_credits") or 0)
         count += int(snap.get("requests") or 0)
         newest = max(newest, float(snap.get("fetched_at") or 0))
+        # `partial` is the aggregate "this view is incomplete" flag the dashboard shows, so a
+        # failed or not-yet-refreshed account sets it; `stale_accounts` names which ones.
         if snap.get("partial") or snap.get("stale"):
             partial = True
+        if snap.get("stale"):
+            stale_out.add(Path(cred_id).name)
     # Failed enabled accounts must remain visible even without a prior snapshot.
     for cred_id in stale:
         if cred_id in enabled:
             partial = True
-            stale_out.append(Path(cred_id).name)
+            stale_out.add(Path(cred_id).name)
     # A zero timestamp preserves quota-difference fallback when no usage snapshot exists.
     for group in groups.values():
         group["total_credits"] = round(group["total_credits"], 2)
@@ -3839,17 +3854,18 @@ def main():
             managed_auth_dir() / "model-catalog.json", ttl=args.model_catalog_ttl)
         CONFIG["cred_pool"].set_ledger(ledger)  # Verify balance ownership before publishing catalogs.
     _publish_model_cache()
+    # Publish cached usage before maintenance threads start, so the dashboard is populated from
+    # the first request. It stays a no-op when nothing is cached, so an empty deployment and a
+    # mocked pool are both unaffected.
+    if CONFIG["usage_snapshots"].detail():
+        _publish_usage_daily(CONFIG["cred_pool"])
+
     runtime_management.install(sys.modules[__name__])
     threading.Thread(target=_refresher_loop, args=(CONFIG["cred_pool"],),
                      daemon=True, name="cred-refresher").start()
     if credits_mod is not None:
         threading.Thread(target=_housekeeper_loop, args=(CONFIG["cred_pool"], ledger),
                          daemon=True, name="cred-housekeeper").start()
-    # Publish cached usage before serving so the dashboard is populated from the first request
-    # instead of waiting for the first maintenance pass. This runs after the pool is real, and
-    # stays a no-op when nothing is cached, so it cannot disturb an empty deployment.
-    if CONFIG["usage_snapshots"].detail():
-        _publish_usage_daily(CONFIG["cred_pool"])
 
     if not args.skip_check:
         preflight()

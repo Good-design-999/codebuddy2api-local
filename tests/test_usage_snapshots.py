@@ -160,6 +160,60 @@ class UsageSnapshotStoreTests(unittest.TestCase):
         self.assertFalse(store.store(PATH, IDENTITY, "domestic", {"by_day": {"nope": {"m": 1.0}}}))
         self.assertEqual(store.accounts(), {})
 
+    def test_malformed_usage_is_rejected_rather_than_normalized_to_zero(self):
+        """A missing or bad field must not become a plausible zero."""
+        store = UsageSnapshots(self.path)
+        bad = {
+            "missing by_day": {"total_credits": 1.0, "requests": 1},
+            "missing total": {"by_day": {}, "requests": 1},
+            "missing requests": {"by_day": {}, "total_credits": 1.0},
+            "none by_day": {"by_day": None, "total_credits": 1.0, "requests": 1},
+            "none total": {"by_day": {}, "total_credits": None, "requests": 1},
+            "empty-string total": {"by_day": {}, "total_credits": "", "requests": 1},
+            "false total": {"by_day": {}, "total_credits": False, "requests": 1},
+            "string total": {"by_day": {}, "total_credits": "1.0", "requests": 1},
+            "negative total": {"by_day": {}, "total_credits": -1.0, "requests": 1},
+            "huge total": {"by_day": {}, "total_credits": 10 ** 400, "requests": 1},
+            "nan total": {"by_day": {}, "total_credits": float("nan"), "requests": 1},
+            "fractional requests": {"by_day": {}, "total_credits": 1.0, "requests": 1.5},
+            "false requests": {"by_day": {}, "total_credits": 1.0, "requests": False},
+            "negative credit day": {"by_day": {"2026-09-19": {"m": -1.0}}, "total_credits": 1.0,
+                                    "requests": 1},
+            "string day credit": {"by_day": {"2026-09-19": {"m": "1"}}, "total_credits": 1.0,
+                                  "requests": 1},
+            "impossible date": {"by_day": {"2026-02-31": {"m": 1.0}}, "total_credits": 1.0,
+                                "requests": 1},
+        }
+        for label, usage in bad.items():
+            with self.subTest(usage=label):
+                self.assertFalse(store.store(PATH, IDENTITY, "domestic", usage))
+        self.assertEqual(store.accounts(), {})
+
+    def test_non_mapping_usage_and_partial_flag_are_rejected(self):
+        store = UsageSnapshots(self.path)
+        self.assertFalse(store.store(PATH, IDENTITY, "domestic", None))
+        self.assertFalse(store.store(PATH, IDENTITY, "domestic", ["by_day"]))
+        for partial in (1, 0, "true", None):
+            with self.subTest(partial=partial):
+                self.assertFalse(store.store(PATH, IDENTITY, "domestic", USAGE, partial=partial))
+        self.assertEqual(store.accounts(), {})
+
+    def test_the_stored_row_is_a_copy_the_caller_cannot_mutate(self):
+        store = UsageSnapshots(self.path)
+        usage = {"by_day": {"2026-09-19": {"m": 1.0}}, "total_credits": 1.0, "requests": 1,
+                 "partial": False}
+        self.assertTrue(store.store(PATH, IDENTITY, "domestic", usage))
+        usage["by_day"]["2026-09-19"]["m"] = 999.0        # Mutating the caller's object...
+        usage["total_credits"] = 999.0
+        self.assertEqual(store.accounts()[PATH]["total_credits"], 1.0)   # ...must not leak in.
+        self.assertEqual(store.accounts()[PATH]["by_day"]["2026-09-19"]["m"], 1.0)
+
+    def test_an_overlong_path_is_rejected_on_write_and_load(self):
+        store = UsageSnapshots(self.path)
+        self.assertFalse(store.store("/" + "x" * 5000, IDENTITY, "domestic", USAGE))
+        self.write({"/" + "x" * 5000: self.row()})
+        self.assertEqual(UsageSnapshots(self.path).accounts(), {})
+
     def test_missing_path_stays_in_memory_only(self):
         store = UsageSnapshots()
         self.assertTrue(store.store(PATH, IDENTITY, "domestic", USAGE))
@@ -261,7 +315,45 @@ class UsageSnapshotIntegrationTests(unittest.TestCase):
         converter.CONFIG["usage_snapshots"] = snapshots
         snapshots.store(entry["id"], entry["account_key"], "domestic",
                         {"by_day": {}, "total_credits": 1.0, "requests": 1, "partial": False})
+        converter.CONFIG["usage_daily_accounts"] = {entry["id"]: {
+            "identity": entry["account_key"], "site": "domestic", "by_day": {},
+            "total_credits": 1.0, "requests": 1, "partial": False, "fetched_at": time.time()}}
         self.assertTrue(pool.remove_file("account.info"))
+        self.assertEqual(UsageSnapshots(self.path).accounts(), {})
+        # The live aggregate row must go too, or a re-add would resurrect the old figure.
+        self.assertNotIn(entry["id"], converter.CONFIG["usage_daily_accounts"])
+
+    def test_re_adding_a_deleted_credential_starts_with_no_usage(self):
+        path = self.credential()
+        pool = converter.CredentialPool([path], blocks_path=self.root / "blocks.json")
+        entry = pool._entries[0]
+        converter.CONFIG["usage_snapshots"] = UsageSnapshots(self.path)
+        converter.CONFIG["usage_snapshots"].store(entry["id"], entry["account_key"], "domestic",
+                                                  {"by_day": {}, "total_credits": 5.0, "requests": 5,
+                                                   "partial": False})
+        converter.CONFIG["usage_daily_accounts"] = {entry["id"]: {
+            "identity": entry["account_key"], "site": "domestic", "by_day": {},
+            "total_credits": 5.0, "requests": 5, "partial": False, "fetched_at": time.time()}}
+        pool.remove_file("account.info")
+        # Re-add the same path and re-publish from a cold aggregate.
+        self.credential()
+        revived = converter.CredentialPool([path], blocks_path=self.root / "blocks.json")
+        converter._publish_usage_daily(revived)
+        self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 0.0)
+
+    def test_deleting_a_credential_also_drops_its_persisted_cooldowns(self):
+        """The two cleanups are independent; deletion must run both."""
+        path = self.credential()
+        pool = converter.CredentialPool([path], blocks_path=self.root / "blocks.json",
+                                        cooldowns_path=self.root / "credential-cooldowns.json")
+        entry = pool._entries[0]
+        converter.CONFIG["usage_snapshots"] = UsageSnapshots(self.path)
+        pool.cooldown(entry["cm"], reason="backend HTTP 401")
+        converter.CONFIG["usage_snapshots"].store(entry["id"], entry["account_key"], "domestic",
+                                                  {"by_day": {}, "total_credits": 1.0, "requests": 1,
+                                                   "partial": False})
+        self.assertTrue(pool.remove_file("account.info"))
+        self.assertEqual(pool.cooldown_detail(), [])
         self.assertEqual(UsageSnapshots(self.path).accounts(), {})
 
     def test_a_write_failure_never_breaks_aggregation(self):
@@ -289,7 +381,32 @@ class UsageSnapshotIntegrationTests(unittest.TestCase):
         self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 2.0)
         # A restored snapshot is stale until a refresh confirms it.
         self.assertTrue(converter.CONFIG["usage_daily_accounts"][entry["id"]]["stale"])
+        self.assertEqual(converter.CONFIG["usage_daily"]["stale_accounts"], ["account.info"])
+        # A restored snapshot is an incomplete view, so the aggregate marks itself partial.
         self.assertTrue(converter.CONFIG["usage_daily"]["partial"])
+
+    def test_a_refresh_clears_only_that_accounts_staleness(self):
+        first = self.credential(name="a.info", uid="uid-a")
+        second = self.credential(name="b.info", uid="uid-b")
+        pool = converter.CredentialPool([first, second], blocks_path=self.root / "blocks.json")
+        snapshots = UsageSnapshots(self.path)
+        converter.CONFIG["usage_snapshots"] = snapshots
+        for entry in pool.entries():
+            snapshots.store(entry["id"], entry["account_key"], "domestic",
+                            {"by_day": {}, "total_credits": 1.0, "requests": 1, "partial": False})
+        converter.CONFIG["usage_daily_accounts"] = None
+        converter._publish_usage_daily(pool)
+        self.assertEqual(len(converter.CONFIG["usage_daily"]["stale_accounts"]), 2)
+        # One account refreshes successfully; the other does not.
+        refreshed, other = pool.entries()
+        converter.CONFIG["usage_daily_accounts"] = {
+            refreshed["id"]: {"identity": refreshed["account_key"], "site": "domestic", "by_day": {},
+                               "total_credits": 3.0, "requests": 2, "partial": False,
+                               "fetched_at": time.time()}}
+        converter._publish_usage_daily(pool, {other["id"]})
+        self.assertEqual(converter.CONFIG["usage_daily"]["stale_accounts"], ["b.info"])
+        # The failed account keeps its last good figure (1.0) alongside the refreshed 3.0.
+        self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 4.0)
 
     def test_a_stale_restored_row_stops_being_shown_once_it_ages_out(self):
         path = self.credential()

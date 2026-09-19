@@ -310,8 +310,8 @@ class PoolCooldownPersistenceTests(unittest.TestCase):
         entry = first._entries[0]
         first.cooldown(entry["cm"], reason="backend HTTP 401")
         first.note_status(entry["cm"], 429, model=MODEL, raw=b"")
-        self.assertTrue(first.clear_cooldowns(entry["cm"], MODEL))
-        self.assertTrue(first.clear_cooldowns(entry["cm"]))
+        self.assertTrue(first.clear_cooldowns(entry["cm"], MODEL)["durable"])
+        self.assertTrue(first.clear_cooldowns(entry["cm"])["durable"])
         revived = self.pool(self.credential())._entries[0]
         self.assertTrue(self.pool(self.credential())._healthy(revived))
         self.assertTrue(self.pool(self.credential())._model_healthy(revived, MODEL))
@@ -383,6 +383,19 @@ class PoolCooldownPersistenceTests(unittest.TestCase):
         self.assertFalse(outcome["durable"])                       # But it is not durable.
         self.assertTrue(pool._healthy(entry))
 
+    def test_a_failed_clear_is_never_reported_as_durable(self):
+        """Memory already lacking a row says nothing about whether disk still has it."""
+        pool = self.pool(self.credential())
+        entry = pool._entries[0]
+        pool.note_status(entry["cm"], 429, model=MODEL, raw=b"")
+        pool._model_fail.pop((entry["id"], MODEL), None)    # Memory is already clear...
+        with patch("app.credential_cooldowns.os.replace", side_effect=OSError("read-only")):
+            outcome = pool.clear_cooldowns(entry["cm"], MODEL)
+        self.assertFalse(outcome["changed_in_memory"])
+        self.assertFalse(outcome["durable"])                 # ...but the disk row survived.
+        self.assertFalse(self.pool(entry["cm"].path)._model_healthy(
+            self.pool(entry["cm"].path)._entries[0], MODEL))
+
     def test_a_write_failure_is_reported_operationally_once_per_interval(self):
         pool = self.pool(self.credential())
         entry = pool._entries[0]
@@ -426,7 +439,13 @@ class PoolCooldownPersistenceTests(unittest.TestCase):
         first = self.pool(path)
         entry = first._entries[0]
         first.note_status(entry["cm"], 429, model=MODEL, raw=b"")
+        generation = entry["generation"]
+        # A real token refresh: the credential file changes and the manager generation advances.
+        self.credential()
+        entry["cm"]._generation += 1
         first.reload([path], reset=False)
+        self.assertNotEqual(entry["generation"], generation)   # The reload really re-read it.
+        self.assertEqual(entry["account_key"], first._entries[0]["account_key"])
         self.assertFalse(first._model_healthy(entry, MODEL))
 
     def test_deleting_and_re_adding_a_credential_starts_clean(self):

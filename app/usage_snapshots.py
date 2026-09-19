@@ -94,6 +94,8 @@ class UsageSnapshots:
         self._lock = threading.RLock()
         self._data: dict[str, dict] = {}
         self.last_error: str | None = None
+        # Set when the cache changed but the write did not land, so a later forget retries.
+        self._dirty = False
         if self.path:
             self._load()
 
@@ -208,6 +210,7 @@ class UsageSnapshots:
         content, shed = self._serialize_locked()
         if content is None:
             self.last_error = "serialize"
+            self._dirty = True
             return False
         temporary = None
         try:
@@ -223,6 +226,7 @@ class UsageSnapshots:
             os.replace(temporary, self.path)
         except OSError as error:
             self.last_error = type(error).__name__
+            self._dirty = True
             return False
         finally:
             if temporary:
@@ -231,6 +235,7 @@ class UsageSnapshots:
                 except OSError:
                     pass
         self.last_error = "capacity" if shed else None
+        self._dirty = shed
         return not shed
 
     # -- reads / writes ----------------------------------------------------
@@ -266,12 +271,12 @@ class UsageSnapshots:
             self._data[path] = row
             return self._save_locked()
 
-    def forget(self, path) -> bool:
-        """Drop a deleted credential's snapshot."""
+    def forget(self, path) -> dict:
+        """Drop a deleted credential's snapshot, reporting change and durability separately."""
         with self._lock:
             if self._data.pop(path, None) is None:
-                return False
-            return self._save_locked()
+                return {"changed": False, "durable": self._retry_locked()}
+            return {"changed": True, "durable": self._save_locked()}
 
     def identity_matches(self, path, identity) -> bool:
         """Whether a cached row belongs to the account currently occupying this path."""
@@ -294,6 +299,10 @@ class UsageSnapshots:
             if dropped:
                 self._save_locked()
             return dropped
+
+    def _retry_locked(self) -> bool:
+        """Re-attempt a write that previously failed, so stale disk rows are not left behind."""
+        return self._save_locked() if self._dirty else True
 
     def _evict_locked(self):
         if self._data:

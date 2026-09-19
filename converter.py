@@ -735,7 +735,8 @@ class CredentialPool:
     def _forget_credential_cooldown(self, entry):
         """Lift a persisted breaker while keeping this account's model cooldowns."""
         if self._durable_identity(entry):
-            self._cooldowns.clear_credential(entry["account_key"], entry["profile"])
+            outcome = self._cooldowns.clear_credential(entry["account_key"], entry["profile"])
+            self._warn_storage("cooldown", outcome["durable"])
 
     def cooldown_detail(self) -> list:
         """Return persisted cooldown rows for diagnostics."""
@@ -760,20 +761,22 @@ class CredentialPool:
             entry = next((e for e in self._entries if e["cm"] is cm), None)
             if entry is None:
                 return {"changed_in_memory": False, "durable": False}
-            if not self._durable_identity(entry):
-                return {"changed_in_memory": False, "durable": False}
+            # The in-memory reset always happens, even when this account's identity is not
+            # complete enough to key durable state.
+            durable = not self._durable_identity(entry)
             if model:
                 routed_model = _upstream_model(model, self._entry_profile(entry))
                 changed = self._model_fail.pop((entry["id"], routed_model), None) is not None
-                # Report what the store actually did: "nothing changed in memory" says nothing
-                # about whether a stale row is still on disk.
-                cleared = self._cooldowns.clear_model(entry["account_key"], entry["profile"], routed_model)
-                self._warn_storage("cooldown", cleared)
-                return {"changed_in_memory": changed, "durable": cleared}
+                if not durable:
+                    outcome = self._cooldowns.clear_model(entry["account_key"], entry["profile"], routed_model)
+                    durable = outcome["durable"]
+                self._warn_storage("cooldown", durable)
+                return {"changed_in_memory": changed, "durable": durable}
             changed = entry["fail_until"] > time.time()
             entry["fail_until"] = 0.0
             entry["last_error"] = None
-            durable = self._cooldowns.clear_credential(entry["account_key"], entry["profile"])
+            if not durable:
+                durable = self._cooldowns.clear_credential(entry["account_key"], entry["profile"])["durable"]
             self._warn_storage("cooldown", durable)
             return {"changed_in_memory": changed, "durable": durable}
 
@@ -1223,7 +1226,7 @@ class CredentialPool:
         """Drop persisted cooldowns for a credential that no longer exists."""
         identity = entry.get("account_key")
         if identity:
-            self._warn_storage("cooldown", self._cooldowns.forget(identity))
+            self._warn_storage("cooldown", self._cooldowns.forget(identity)["durable"])
 
     def forget_usage(self, entry):
         """Drop a deleted credential's cached usage, in the store and the live aggregate."""
@@ -1515,7 +1518,11 @@ def _adopt_cached_usage(pool, snapshots, accounts):
     cached = snapshots.accounts()
     if not cached and not accounts:
         return              # Nothing cached and nothing live: leave the pool untouched.
-    owners = {entry["id"]: entry.get("account_key") for entry in pool.entries()}
+    # Only an account whose identity components are all present may own durable usage: an
+    # account_key is a hash of the profile and UID, so an account with no UID would otherwise
+    # share one identity with every other such account.
+    owners = {entry["id"]: entry.get("account_key") for entry in pool.entries()
+              if entry.get("account_key") and entry.get("profile") and entry.get("uid")}
     # Drop any row whose recorded owner no longer matches the account at that path. This covers
     # rows hydrated by an earlier pass as well as live rows, so a reused path cannot keep
     # displaying the previous account's usage.
@@ -1603,9 +1610,12 @@ def _housekeep_once(pool: CredentialPool, ledger, *, pending_only=False):
         return
     with _HOUSEKEEP_LOCK:
         pool._rescan()
-        pool._cooldowns.prune()   # Drop expired deadlines so the table cannot grow without bound.
+        # Drop expired deadlines and aged usage so neither table grows without bound; a failed
+        # prune is reported rather than silently leaving stale rows on disk.
+        pool._cooldowns.prune()
+        pool._warn_storage("cooldown", pool._cooldowns.last_error is None)
         if CONFIG.get("usage_snapshots") is not None:
-            CONFIG["usage_snapshots"].prune()   # Cached usage older than the window is not shown.
+            CONFIG["usage_snapshots"].prune()
         ids = pool.begin_sync(all_entries=not pending_only)
         failed = set()
         try:

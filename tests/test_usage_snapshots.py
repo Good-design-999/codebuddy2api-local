@@ -356,14 +356,43 @@ class UsageSnapshotIntegrationTests(unittest.TestCase):
         self.assertEqual(pool.cooldown_detail(), [])
         self.assertEqual(UsageSnapshots(self.path).accounts(), {})
 
-    def test_a_write_failure_never_breaks_aggregation(self):
+    def test_a_write_failure_during_a_real_sync_still_publishes_usage(self):
+        """Drive the real maintenance path, so the patched writer is genuinely exercised."""
+        path = self.credential()
+        pool = converter.CredentialPool([path], blocks_path=self.root / "blocks.json")
+        snapshots = UsageSnapshots(self.path)
+        converter.CONFIG["usage_snapshots"] = snapshots
+        converter.CONFIG["usage_daily_accounts"] = None
+        usage = {"by_day": {"2026-09-19": {"m": 3.0}}, "total_credits": 3.0, "requests": 2,
+                 "partial": False}
+        with patch.object(converter.credits_mod, "fetch_request_usage", return_value=usage),                 patch("app.usage_snapshots.os.replace", side_effect=OSError("read-only")) as writer:
+            stale = converter._sync_usage(pool)
+        self.assertTrue(writer.called, "the cache writer was never reached")
+        self.assertEqual(stale, set())
+        # The failure is recorded, but the dashboard still shows the freshly fetched figures.
+        self.assertIsNotNone(snapshots.last_error)
+        self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 3.0)
+        self.assertNotIn("stale_accounts", converter.CONFIG["usage_daily"])
+
+    def test_a_real_sync_persists_and_survives_a_restart(self):
+        """The same path with a healthy writer must leave a restorable cache behind."""
         path = self.credential()
         pool = converter.CredentialPool([path], blocks_path=self.root / "blocks.json")
         converter.CONFIG["usage_snapshots"] = UsageSnapshots(self.path)
         converter.CONFIG["usage_daily_accounts"] = None
-        with patch("app.usage_snapshots.os.replace", side_effect=OSError("read-only")):
-            converter._publish_usage_daily(pool)      # Must not raise.
-        self.assertIsNotNone(converter.CONFIG["usage_daily"])
+        usage = {"by_day": {"2026-09-19": {"m": 4.0}}, "total_credits": 4.0, "requests": 1,
+                 "partial": False}
+        with patch.object(converter.credits_mod, "fetch_request_usage", return_value=usage):
+            converter._sync_usage(pool)
+        entry = pool._entries[0]
+        cached = UsageSnapshots(self.path).accounts()[entry["id"]]
+        self.assertEqual(cached["total_credits"], 4.0)
+        self.assertEqual(cached["identity"], entry["account_key"])
+        # A cold aggregate seeded from disk reports the same figure, marked stale.
+        converter.CONFIG["usage_daily_accounts"] = None
+        converter._publish_usage_daily(pool)
+        self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 4.0)
+        self.assertEqual(converter.CONFIG["usage_daily"]["stale_accounts"], ["account.info"])
 
     def test_startup_publication_hydrates_from_the_cache(self):
         """The startup path must populate usage without waiting for a maintenance pass."""
@@ -422,6 +451,25 @@ class UsageSnapshotIntegrationTests(unittest.TestCase):
         converter._publish_usage_daily(pool)
         self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 0.0)
         self.assertEqual(snapshots.accounts(), {})          # The aged row is dropped, not kept.
+
+    def test_an_account_without_a_uid_never_owns_durable_usage(self):
+        """Two accounts with no UID hash alike, so neither may key a cached snapshot."""
+        path = self.root / "anonymous.info"
+        now = time.time()
+        path.write_text(json.dumps({"account": {}, "auth": {
+            "accessToken": "t", "refreshToken": "r", "domain": "www.codebuddy.cn",
+            "expiresAt": (now + 86400) * 1000, "lastRefreshTime": now * 1000}}), encoding="utf-8")
+        pool = converter.CredentialPool([path], blocks_path=self.root / "blocks.json")
+        entry = pool._entries[0]
+        snapshots = UsageSnapshots(self.path)
+        converter.CONFIG["usage_snapshots"] = snapshots
+        # Even a row written directly for that hash is not adopted, because the account cannot
+        # prove it owns it.
+        snapshots.store(entry["id"], entry["account_key"], "domestic",
+                        {"by_day": {}, "total_credits": 8.0, "requests": 1, "partial": False})
+        converter.CONFIG["usage_daily_accounts"] = None
+        converter._publish_usage_daily(pool)
+        self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 0.0)
 
     def test_hydrated_rows_are_rechecked_against_current_ownership(self):
         """A row hydrated on an earlier pass must not survive a later path reuse."""

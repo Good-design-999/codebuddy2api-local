@@ -103,6 +103,9 @@ class CredentialCooldowns:
         self._data: dict[str, dict] = {}
         # Last write failure, surfaced for diagnostics instead of failing silently.
         self.last_error: str | None = None
+        # Set when the in-memory table changed but the write did not land. A later clear must
+        # retry the write instead of reporting "nothing to do" while stale rows sit on disk.
+        self._dirty = False
         if self.path:
             self._load()
 
@@ -199,6 +202,7 @@ class CredentialCooldowns:
         content, shed = self._serialize_locked()
         if content is None:
             self.last_error = "serialize"
+            self._dirty = True
             return False
         temporary = None
         try:
@@ -214,6 +218,7 @@ class CredentialCooldowns:
             os.replace(temporary, self.path)
         except OSError as error:
             self.last_error = type(error).__name__
+            self._dirty = True
             return False
         finally:
             if temporary:
@@ -222,6 +227,7 @@ class CredentialCooldowns:
                 except OSError:
                     pass
         self.last_error = "capacity" if shed else None
+        self._dirty = shed          # The write landed, but rows were dropped to fit.
         return not shed
 
     # -- table helpers -----------------------------------------------------
@@ -264,6 +270,12 @@ class CredentialCooldowns:
         oldest = min(self._data, key=lambda key: max(
             [float(self._data[key].get("fail_until") or 0.0)] + list(self._data[key]["models"].values())))
         self._data.pop(oldest, None)
+
+    def _retry_locked(self) -> bool:
+        """Re-attempt a write that previously failed, so stale disk rows are not left behind."""
+        if not self._dirty:
+            return True
+        return self._save_locked()
 
     def _drop_locked(self, identity, row):
         if not row.get("models") and not row.get("fail_until"):
@@ -317,35 +329,40 @@ class CredentialCooldowns:
             row["models"] = {m: u for m, u in row["models"].items() if u > now}
             self._drop_locked(identity, row)
 
-    def clear_credential(self, identity, profile=None) -> bool:
-        """Drop a circuit breaker; returns whether the change is durable."""
+    def clear_credential(self, identity, profile=None) -> dict:
+        """Drop a circuit breaker, reporting whether anything changed and whether it is durable.
+
+        "Nothing to change" and "the write failed" are different outcomes: only the second
+        leaves stale data on disk that a later restart would restore.
+        """
         with self._lock:
             row = self._lookup_locked(identity, profile)
             if row is None:
-                return False
+                # Nothing to change here, but a previous failed write may still be on disk.
+                return {"changed": False, "durable": self._retry_locked()}
             row["fail_until"] = 0.0
             row["reason"] = ""
             self._drop_locked(identity, row)
-            return self._save_locked()
+            return {"changed": True, "durable": self._save_locked()}
 
-    def clear_model(self, identity, profile, model) -> bool:
-        """Drop one model's cooldown; returns whether the change is durable."""
+    def clear_model(self, identity, profile, model) -> dict:
+        """Drop one model's cooldown, reporting whether anything changed and whether it is durable."""
         with self._lock:
             row = self._lookup_locked(identity, profile)
             if row is None or model not in row["models"]:
-                return False
+                return {"changed": False, "durable": self._retry_locked()}
             row["models"].pop(model, None)
             self._drop_locked(identity, row)
-            return self._save_locked()
+            return {"changed": True, "durable": self._save_locked()}
 
-    def forget(self, identity) -> bool:
+    def forget(self, identity) -> dict:
         """Remove an account entirely; used when its credential is deleted or replaced."""
         with self._lock:
             if self._data.pop(identity, None) is None:
-                return False
-            return self._save_locked()
+                return {"changed": False, "durable": self._retry_locked()}
+            return {"changed": True, "durable": self._save_locked()}
 
-    def prune(self, now=None) -> bool:
+    def prune(self, now=None) -> dict:
         """Drop expired deadlines so the table cannot accumulate dead rows."""
         now = time.time() if now is None else now
         with self._lock:
@@ -362,9 +379,7 @@ class CredentialCooldowns:
                 before = len(self._data)
                 self._drop_locked(identity, row)
                 changed = changed or len(self._data) != before
-            if changed:
-                self._save_locked()
-            return changed
+            return {"changed": changed, "durable": self._save_locked() if changed else True}
 
     # -- reads -------------------------------------------------------------
 

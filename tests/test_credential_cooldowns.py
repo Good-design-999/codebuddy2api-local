@@ -117,7 +117,7 @@ class CooldownStoreTests(unittest.TestCase):
         store.note_model(IDENTITY, PROFILE, "live-model", time.time() + 600)
         with store._lock:                      # Write an already-expired breaker directly.
             store._data[IDENTITY]["fail_until"] = time.time() - 1
-        self.assertTrue(store.prune())
+        self.assertTrue(store.prune()["changed"])
         self.assertEqual(set(store.restore(IDENTITY, PROFILE)["models"]), {"live-model"})
         self.assertEqual(store.credential_until(IDENTITY, PROFILE), 0.0)
 
@@ -199,12 +199,12 @@ class CooldownStoreTests(unittest.TestCase):
         store = CredentialCooldowns(self.path)
         store.note_credential(IDENTITY, PROFILE, time.time() + 300)
         store.note_model(IDENTITY, PROFILE, MODEL, time.time() + 600)
-        self.assertTrue(store.clear_model(IDENTITY, PROFILE, MODEL))
+        self.assertTrue(store.clear_model(IDENTITY, PROFILE, MODEL)["changed"])
         self.assertEqual(store.restore(IDENTITY, PROFILE)["models"], {})
-        self.assertTrue(store.clear_credential(IDENTITY, PROFILE))
+        self.assertTrue(store.clear_credential(IDENTITY, PROFILE)["changed"])
         self.assertEqual(store.detail(), [])
         store.note_credential(IDENTITY, PROFILE, time.time() + 300)
-        self.assertTrue(store.forget(IDENTITY))
+        self.assertTrue(store.forget(IDENTITY)["changed"])
         self.assertEqual(json.loads(self.path.read_text())["accounts"], {})
 
     def test_a_write_failure_is_reported_and_keeps_state_in_memory(self):
@@ -221,10 +221,32 @@ class CooldownStoreTests(unittest.TestCase):
         store = CredentialCooldowns(self.path)
         store.note_credential(IDENTITY, PROFILE, time.time() + 300)
         with patch("app.credential_cooldowns.os.replace", side_effect=OSError("read-only")):
-            self.assertFalse(store.clear_credential(IDENTITY, PROFILE))
+            outcome = store.clear_credential(IDENTITY, PROFILE)
+        self.assertTrue(outcome["changed"])          # The in-memory row was dropped.
+        self.assertFalse(outcome["durable"])         # But the disk row survived.
         self.assertIsNotNone(store.last_error)
         self.assertEqual(store.credential_until(IDENTITY, PROFILE), 0.0)     # Cleared in memory.
         self.assertGreater(json.loads(self.path.read_text())["accounts"][IDENTITY]["fail_until"], 0)
+
+    def test_a_clear_retries_a_previously_failed_write(self):
+        """A second clear must retry the write, not report "nothing to do" while disk is stale."""
+        store = CredentialCooldowns(self.path)
+        store.note_credential(IDENTITY, PROFILE, time.time() + 300)
+        with patch("app.credential_cooldowns.os.replace", side_effect=OSError("read-only")):
+            self.assertFalse(store.clear_credential(IDENTITY, PROFILE)["durable"])
+        self.assertGreater(json.loads(self.path.read_text())["accounts"][IDENTITY]["fail_until"], 0)
+        # The retry runs with the fault removed.
+        outcome = store.clear_credential(IDENTITY, PROFILE)
+        self.assertFalse(outcome["changed"])         # Nothing left to change in memory.
+        self.assertTrue(outcome["durable"])          # But the stale disk row was cleared.
+        self.assertNotIn(IDENTITY, json.loads(self.path.read_text())["accounts"])
+
+    def test_clear_outcomes_distinguish_noop_from_failure(self):
+        store = CredentialCooldowns(self.path)
+        # Nothing recorded at all: a genuine no-op, which is durable by definition.
+        self.assertEqual(store.clear_credential(IDENTITY, PROFILE), {"changed": False, "durable": True})
+        self.assertEqual(store.clear_model(IDENTITY, PROFILE, MODEL), {"changed": False, "durable": True})
+        self.assertEqual(store.forget(IDENTITY), {"changed": False, "durable": True})
 
     def test_missing_path_stays_in_memory_only(self):
         store = CredentialCooldowns()
@@ -269,11 +291,12 @@ class PoolCooldownPersistenceTests(unittest.TestCase):
         self.enterContext(patch.object(converter, "_log"))
         self.path = self.root / "credential-cooldowns.json"
 
-    def credential(self, name="account.info", uid="synthetic-uid", domain="www.codebuddy.cn"):
+    def credential(self, name="account.info", uid="synthetic-uid", domain="www.codebuddy.cn",
+                   access_token="synthetic-token"):
         now = time.time()
         path = self.root / name
         path.write_text(json.dumps({"account": {"uid": uid}, "auth": {
-            "accessToken": "synthetic-token", "refreshToken": "synthetic-refresh", "domain": domain,
+            "accessToken": access_token, "refreshToken": "synthetic-refresh", "domain": domain,
             "expiresAt": (now + 86400) * 1000, "lastRefreshTime": now * 1000}}), encoding="utf-8")
         return path
 
@@ -435,18 +458,22 @@ class PoolCooldownPersistenceTests(unittest.TestCase):
         self.assertFalse(revived._model_healthy(revived._entries[0], MODEL))
 
     def test_a_same_account_token_refresh_keeps_cooldowns(self):
+        """A refresh writes a new token for the same account; the 429 cooldown must persist."""
         path = self.credential()
         first = self.pool(path)
         entry = first._entries[0]
         first.note_status(entry["cm"], 429, model=MODEL, raw=b"")
         generation = entry["generation"]
-        # A real token refresh: the credential file changes and the manager generation advances.
-        self.credential()
-        entry["cm"]._generation += 1
+        # A real refresh: the token file is rewritten and the manager is invalidated, which is
+        # what CredentialManager itself does after writing new credentials.
+        self.credential(access_token="rotated-access-token")
+        entry["cm"].invalidate()
         first.reload([path], reset=False)
         self.assertNotEqual(entry["generation"], generation)   # The reload really re-read it.
         self.assertEqual(entry["account_key"], first._entries[0]["account_key"])
         self.assertFalse(first._model_healthy(entry, MODEL))
+        # And it survives a restart too.
+        self.assertFalse(self.pool(path)._model_healthy(self.pool(path)._entries[0], MODEL))
 
     def test_deleting_and_re_adding_a_credential_starts_clean(self):
         path = self.credential()

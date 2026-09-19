@@ -50,6 +50,7 @@ from app.adapters.anthropic_adapter import (
 from app import auth_oauth
 from app import trial_rewards
 from app import buddy, checkin as checkin_service, model_policy, travel
+from app.credential_cooldowns import CredentialCooldowns
 from app.model_blocks import ModelBlocks
 from app.client_hangup import ClientHungUp, await_or_hangup
 from app.observability import (AuditMiddleware, observe_recovery, observe_route,
@@ -461,13 +462,15 @@ class CredentialPool:
     """Manage credential discovery, reloads, sticky sessions, cooldowns and refresh."""
 
     def __init__(self, paths: list[Path] | None = None, scan: bool = False,
-                 blocks_path: Path | None = None):
+                 blocks_path: Path | None = None, cooldowns_path: Path | None = None):
         self._lock = threading.RLock()
         self._entries: list[dict] = []   # {id, cm, fail_until}
         self._sticky: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
         self._model_fail: dict[tuple[str, str], float] = {}  # Per-credential/model 429 expiry
         # Keep unsupported-model backoff isolated by backend and model.
         self._blocks = ModelBlocks(blocks_path, ttl_s=MODEL_SITE_BLOCK_S, max_ttl_s=MODEL_SITE_BLOCK_MAX_S)
+        # Cooldowns outlive a restart so a backend that just refused is not retried immediately.
+        self._cooldowns = CredentialCooldowns(cooldowns_path)
         self._rr = {None: 0, "cn": 0, "intl": 0}
         self._ledger = None              # Prefer credits expiring sooner.
         self._capacity = AccountCapacity()
@@ -505,16 +508,24 @@ class CredentialPool:
                     changed = reset or generation != entry.get("generation")
                     if changed:
                         old_identity = entry.get("account_key")
-                        if old_identity != identity:
+                        replaced = old_identity != identity
+                        if replaced:
                             self._model_fail = {key: until for key, until in self._model_fail.items() if key[0] != cid}
                             self._sticky = OrderedDict((key, value) for key, value in self._sticky.items() if value[0] != cid)
+                            # The path now belongs to another account; its cooldowns must not carry over.
+                            self.forget_cooldowns(entry)
                         if entry.get("uid"):
                             have_uids.pop(old_identity, None)
                         entry.update(uid=summary.get("uid"), profile=summary["profile"], site=summary["site"],
                                      account_key=identity, generation=generation, catalog_dirty=True)
                         self._bind_entry(entry)
-                        if reset or old_identity != identity:
+                        if reset or replaced:
                             entry.update(fail_until=0.0, keepalive_after=0.0)
+                        if reset:
+                            # An explicit reload re-evaluates auth now, so the persisted breaker is
+                            # lifted; model cooldowns describe upstream quota and are retained.
+                            self._forget_credential_cooldown(entry)
+                        self._adopt_cooldowns(entry)
                         if entry.get("uid"):
                             have_uids[identity] = cid
                         self._queue_sync(cid)
@@ -536,6 +547,7 @@ class CredentialPool:
                          "site": summary.get("site"), "profile": profile, "generation": manager._generation,
                          "account_key": identity_key, "catalog_dirty": True}
                 self._bind_entry(entry)
+                self._adopt_cooldowns(entry)
                 self._entries.append(entry)
                 by_id[cid] = entry
                 self._ignored_duplicates.discard(cid)
@@ -618,6 +630,7 @@ class CredentialPool:
             for entry in removed:
                 if self._ledger is not None:
                     self._ledger.remove(entry["id"])
+                self.forget_cooldowns(entry)
             self._entries = [e for e in self._entries if e not in removed]
             if len(self._entries) != before:
                 ids = {e["id"] for e in self._entries}
@@ -654,6 +667,82 @@ class CredentialPool:
                 self._ledger.bind_identity(entry["id"], entry["account_key"])
             else:
                 self._ledger.remove(entry["id"])
+
+    def _adopt_cooldowns(self, entry):
+        """Hydrate persisted cooldowns once per identity, so the in-memory table stays authoritative."""
+        identity, profile = entry.get("account_key"), entry.get("profile")
+        if not identity or not profile:
+            return          # Adopt later, once this account's identity is known.
+        if entry.get("cooldowns_adopted") == identity:
+            return
+        entry["cooldowns_adopted"] = identity
+        state = self._cooldowns.restore(identity, profile)
+        if not state:
+            return
+        # Deadlines are absolute and already bounded, so adopting one never extends a cooldown.
+        if state.get("fail_until"):
+            entry["fail_until"] = max(entry.get("fail_until") or 0.0, state["fail_until"])
+            if state.get("reason"):
+                entry["last_error"] = state["reason"]
+            if state.get("failed_at"):
+                entry["last_failure_at"] = state["failed_at"]
+        for model, until in (state.get("models") or {}).items():
+            key = (entry["id"], model)
+            self._model_fail[key] = max(self._model_fail.get(key, 0.0), until)
+
+    def _remember_credential(self, entry, reason):
+        """Mirror a credential circuit breaker to disk; returns whether it is durable."""
+        identity, profile = entry.get("account_key"), entry.get("profile")
+        if identity and profile:
+            return self._cooldowns.note_credential(identity, profile, entry["fail_until"], reason=reason)
+        return False
+
+    def _remember_model(self, entry, model, until):
+        """Mirror a model cooldown to disk; returns whether it is durable."""
+        identity, profile = entry.get("account_key"), entry.get("profile")
+        if identity and profile:
+            return self._cooldowns.note_model(identity, profile, model, until)
+        return False
+
+    def _forget_credential_cooldown(self, entry):
+        """Lift a persisted breaker while keeping this account's model cooldowns."""
+        identity, profile = entry.get("account_key"), entry.get("profile")
+        if identity and profile:
+            self._cooldowns.clear_credential(identity, profile)
+
+    def cooldown_detail(self) -> list:
+        """Return persisted cooldown rows for diagnostics."""
+        return self._cooldowns.detail()
+
+    def cooldown_storage(self) -> dict:
+        """Report whether cooldown persistence is currently usable."""
+        return {"available": self._cooldowns.path is not None, "path": self._cooldowns.path,
+                "degraded": self._cooldowns.last_error is not None,
+                "last_error": self._cooldowns.last_error, "rows": len(self._cooldowns.detail()),
+                "warning": "冷却持久化写入失败，本次运行仍按内存态生效。" if self._cooldowns.last_error else None}
+
+    def clear_cooldowns(self, cm, model: str | None = None) -> bool:
+        """Lift a circuit breaker or model cooldown after a confirmed recovery or admin reset.
+
+        Persisting cooldowns removes the old "restart the gateway to clear it" workaround,
+        so an explicit reset has to be able to lift one both in memory and on disk.
+        """
+        with self._lock:
+            entry = next((e for e in self._entries if e["cm"] is cm), None)
+            if entry is None:
+                return False
+            identity, profile = entry.get("account_key"), entry.get("profile")
+            if model:
+                routed_model = _upstream_model(model, self._entry_profile(entry))
+                removed = self._model_fail.pop((entry["id"], routed_model), None) is not None
+                if identity and profile:
+                    removed = self._cooldowns.clear_model(identity, profile, routed_model) or removed
+                return removed
+            entry["fail_until"] = 0.0
+            entry["last_error"] = None
+            if identity and profile:
+                self._cooldowns.clear_credential(identity, profile)
+            return True
 
     def entries(self) -> list[dict]:
         """Return credential snapshots for account maintenance."""
@@ -926,6 +1015,7 @@ class CredentialPool:
                     e["fail_until"] = time.time() + CRED_COOLDOWN
                     e["last_error"] = sanitize_log_text(reason, 256)
                     e["last_failure_at"] = time.time()
+                    self._remember_credential(e, e["last_error"])
         _log(f"[cred] 凭证熔断 {CRED_COOLDOWN}s: {Path(cm.path).name} {reason}")
 
     def note_status(self, cm: CredentialManager | None, status: int,
@@ -959,6 +1049,7 @@ class CredentialPool:
                     key = (e["id"], routed_model)
                     until = max(until, self._model_fail.get(key, 0.0))
                     self._model_fail[key] = until
+                    self._remember_model(e, routed_model, until)
         _log(f"[cred] 模型冷却 {model} @ {Path(cm.path).name} 至 "
              f"{time.strftime('%m-%d %H:%M:%S', time.localtime(until))} (HTTP 429)")
 
@@ -1094,6 +1185,12 @@ class CredentialPool:
                 return False
             self.prune()
             return True
+
+    def forget_cooldowns(self, entry):
+        """Drop persisted cooldowns for a deleted credential so the table stays bounded."""
+        identity = entry.get("account_key")
+        if identity:
+            self._cooldowns.forget(identity)
 
     def first(self) -> CredentialManager | None:
         with self._lock:
@@ -1402,6 +1499,7 @@ def _housekeep_once(pool: CredentialPool, ledger, *, pending_only=False):
         return
     with _HOUSEKEEP_LOCK:
         pool._rescan()
+        pool._cooldowns.prune()   # Drop expired deadlines so the table cannot grow without bound.
         ids = pool.begin_sync(all_entries=not pending_only)
         failed = set()
         try:
@@ -3637,7 +3735,8 @@ def main():
     if not files:
         seed_credentials()  # Seed missing desktop credentials into managed storage.
     CONFIG["cred_pool"] = CredentialPool(files, scan=not files,
-                                         blocks_path=managed_auth_dir() / "model-site-blocks.json")
+                                         blocks_path=managed_auth_dir() / "model-site-blocks.json",
+                                         cooldowns_path=managed_auth_dir() / "credential-cooldowns.json")
     CONFIG["cred"] = CONFIG["cred_pool"].first()
     CONFIG["account_catalogs"] = {}  # Disable static fallback before maintenance starts.
     if credits_mod is not None:

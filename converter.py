@@ -68,6 +68,7 @@ from app import model_capabilities
 from app.message_normalization import merge_intl_user_images
 from app.model_catalog_view import INTERNATIONAL as SHARED_INTL_PROFILES, share_models
 from app.inference_auth import require_api_key
+from app.admin_auth import SessionStoreError
 from app.content_filter import ContentFilterDetector, is_filter_error
 from app.request_limits import ImageLimitError, apply_image_policy
 from app.safe_logging import format_log_body, sanitize_log_text
@@ -3919,7 +3920,13 @@ def main():
     if CONFIG["usage_snapshots"].detail():
         _publish_usage_daily(CONFIG["cred_pool"])
 
-    runtime_management.install(sys.modules[__name__])
+    try:
+        runtime_management.install(sys.modules[__name__])
+    except SessionStoreError as error:
+        # An obsolete session snapshot survived, so the new key epoch must not activate:
+        # a later start under the superseded key could adopt it and revive admin cookies.
+        runtime_management.close(CONFIG)
+        ap.error(str(error))
     threading.Thread(target=_refresher_loop, args=(CONFIG["cred_pool"],),
                      daemon=True, name="cred-refresher").start()
     if credits_mod is not None:

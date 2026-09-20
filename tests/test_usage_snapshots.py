@@ -374,6 +374,79 @@ class UsageSnapshotIntegrationTests(unittest.TestCase):
         self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 3.0)
         self.assertNotIn("stale_accounts", converter.CONFIG["usage_daily"])
 
+    def test_a_concurrent_deletion_during_publication_does_not_raise(self):
+        """Publication must aggregate a consistent snapshot, not index the live map.
+
+        forget_usage() pops from the same dictionary under the pool lock. A reader that copies the
+        keys and then indexes the live dict therefore raises KeyError when a credential is deleted
+        mid-pass, which aborts the usage pass. The live rows are seeded directly so the hook below
+        fires only in the aggregation loop, and the lock is asserted rather than timed.
+        """
+        first = self.credential(name="first.info", uid="first-uid")
+        second = self.credential(name="second.info", uid="second-uid")
+        pool = converter.CredentialPool([first, second], blocks_path=self.root / "blocks.json")
+        rows = {}
+        for entry in pool._entries:
+            rows[entry["id"]] = {"identity": entry["account_key"], "site": "domestic",
+                                 "by_day": {"2026-09-19": {"m": 3.0}}, "total_credits": 3.0,
+                                 "requests": 3, "partial": False, "fetched_at": time.time()}
+        converter.CONFIG["usage_snapshots"] = UsageSnapshots(self.path)   # Empty store.
+        converter.CONFIG["usage_daily_accounts"] = dict(rows)
+        victim = pool._entries[1]["id"]
+
+        original = converter._usage_row_expired
+        observed = []
+
+        def expiring(snap):
+            if not observed:
+                observed.append(True)
+                # Runs inside the reader's aggregation loop: assert mutual exclusion, then delete
+                # the row the reader has not reached yet.
+                observed.append(pool._lock._is_owned())
+                converter.CONFIG["usage_daily_accounts"].pop(victim, None)
+            return original(snap)
+
+        with patch.object(converter, "_usage_row_expired", side_effect=expiring):
+            converter._publish_usage_daily(pool)          # Must not raise KeyError.
+        self.assertEqual(observed[:2], [True, True], "interleaving not reached, or read unlocked")
+        self.assertIsNotNone(converter.CONFIG["usage_daily"])
+        self.assertNotIn(victim, converter.CONFIG["usage_daily_accounts"])
+        # The pass aggregates the snapshot it took at entry, so a row deleted mid-pass is still
+        # counted this once and simply disappears on the next pass. Consistency is the contract.
+        self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 6.0)
+        converter._publish_usage_daily(pool)
+        self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 3.0)
+
+    def test_adoption_holds_the_pool_lock_while_reading_the_map(self):
+        """_adopt_cached_usage() reads and prunes the live map, so it needs the same lock."""
+        path = self.credential(name="shared.info", uid="first-uid")
+        pool = converter.CredentialPool([path], blocks_path=self.root / "blocks.json")
+        entry = pool._entries[0]
+        snapshots = UsageSnapshots(self.path)
+        snapshots.store(entry["id"], entry["account_key"], "domestic",
+                        {"by_day": {"2026-09-19": {"m": 7.0}}, "total_credits": 7.0,
+                         "requests": 7, "partial": False})
+        converter.CONFIG["usage_snapshots"] = snapshots
+        # A live row whose recorded owner no longer matches forces the prune path.
+        converter.CONFIG["usage_daily_accounts"] = {entry["id"]: {
+            "identity": "0" * 64, "site": "domestic", "by_day": {},
+            "total_credits": 1.0, "requests": 1, "fetched_at": time.time()}}
+
+        original = UsageSnapshots.accounts
+        observed = []
+
+        def accounts_probe(self):
+            rows = original(self)
+            if not observed:
+                observed.append(pool._lock._is_owned())
+            return rows
+
+        with patch.object(UsageSnapshots, "accounts", accounts_probe):
+            converter._publish_usage_daily(pool)
+        self.assertEqual(observed, [True], "the live map was read without the pool lock")
+        # The mismatched row was pruned, and the cache refilled it for the current account.
+        self.assertEqual(converter.CONFIG["usage_daily"]["total_credits"], 7.0)
+
     def test_a_malformed_partial_flag_is_rejected_not_coerced(self):
         """A non-boolean partial must never be masked into a legitimate-looking flag.
 

@@ -1550,91 +1550,102 @@ def _adopt_cached_usage(pool, snapshots, accounts):
     written: a path can be reused between restarts, and a row hydrated on an earlier pass
     would otherwise keep showing the previous account's usage indefinitely.
     """
-    cached = snapshots.accounts()
-    if not cached and not accounts:
-        return              # Nothing cached and nothing live: leave the pool untouched.
-    # Only an account whose identity components are all present may own durable usage: an
-    # account_key is a hash of the profile and UID, so an account with no UID would otherwise
-    # share one identity with every other such account.
-    owners = {entry["id"]: entry.get("account_key") for entry in pool.entries()
-              if entry.get("account_key") and entry.get("profile") and entry.get("uid")}
-    # Drop any row whose recorded owner no longer matches the account at that path. This covers
-    # rows hydrated by an earlier pass as well as live rows, so a reused path cannot keep
-    # displaying the previous account's usage.
-    for path in list(accounts):
-        if owners.get(path) != accounts[path].get("identity"):
-            accounts.pop(path, None)
-    for path, row in cached.items():
-        identity = row.get("identity")
-        if owners.get(path) != identity:
-            snapshots.forget(path)      # The path moved on; the cached row is not ours to show.
-            continue
-        if _usage_row_expired(row):
-            snapshots.forget(path)
-            continue
-        # A live snapshot from this run always wins; the cache only fills a gap.
-        if path in accounts:
-            continue
-        # A restored snapshot is stale until a refresh confirms it; clearing that is per account.
-        accounts[path] = dict(row)
-        accounts[path]["stale"] = True
-    CONFIG["usage_daily_accounts"] = accounts
+    # The live map is mutated by forget_usage under the pool lock, so the reads below need that
+    # same lock to stay consistent with a concurrent credential deletion or replacement.
+    with pool._lock:
+        cached = snapshots.accounts()
+        if not cached and not accounts:
+            return          # Nothing cached and nothing live: leave the pool untouched.
+        # Only an account whose identity components are all present may own durable usage: an
+        # account_key is a hash of the profile and UID, so an account with no UID would otherwise
+        # share one identity with every other such account.
+        owners = {entry["id"]: entry.get("account_key") for entry in pool.entries()
+                  if entry.get("account_key") and entry.get("profile") and entry.get("uid")}
+        # Drop any row whose recorded owner no longer matches the account at that path. This covers
+        # rows hydrated by an earlier pass as well as live rows, so a reused path cannot keep
+        # displaying the previous account's usage. Iterate over a copy of the items, so a row is
+        # never looked up in the live map after the keys were copied.
+        for path, row in list(accounts.items()):
+            if owners.get(path) != row.get("identity"):
+                accounts.pop(path, None)
+        for path, row in cached.items():
+            identity = row.get("identity")
+            if owners.get(path) != identity:
+                snapshots.forget(path)      # The path moved on; the cached row is not ours to show.
+                continue
+            if _usage_row_expired(row):
+                snapshots.forget(path)
+                continue
+            # A live snapshot from this run always wins; the cache only fills a gap.
+            if path in accounts:
+                continue
+            # A restored snapshot is stale until a refresh confirms it; clearing that is per account.
+            accounts[path] = dict(row)
+            accounts[path]["stale"] = True
+        CONFIG["usage_daily_accounts"] = accounts
 
 
 def _publish_usage_daily(pool, stale=()):
     """Aggregate enabled accounts' usage, retaining failed snapshots with explicit staleness."""
-    accounts = CONFIG.get("usage_daily_accounts")
-    if not isinstance(accounts, dict):
-        accounts = {}
-    # Seed from the on-disk cache so the dashboard is not blank until the first refresh.
-    snapshots = CONFIG.get("usage_snapshots")
-    if snapshots is not None:
-        _adopt_cached_usage(pool, snapshots, accounts)
-    enabled = {e["id"] for e in pool.entries() if model_policy.credential_enabled(CONFIG, e)}
-    by_day, groups = {}, {}
-    used, count = 0.0, 0
-    partial = False          # Upstream paging hid additional usage for some account.
-    stale_out = set()        # Accounts whose displayed figures are not from this run.
-    newest = 0.0
-    for cred_id in list(accounts):
-        snap = accounts[cred_id]
-        if cred_id not in enabled:
-            continue
-        if _usage_row_expired(snap):
-            accounts.pop(cred_id, None)      # Drop it from the live map, not just from this sum.
-            continue
-        site = snap.get("site") or "domestic"
-        group = groups.setdefault(site, {"by_day": {}, "total_credits": 0.0, "requests": 0})
-        for day, models in (snap.get("by_day") or {}).items():
-            total_day = by_day.setdefault(day, {})
-            site_day = group["by_day"].setdefault(day, {})
-            for model, credit in models.items():
-                total_day[model] = round(total_day.get(model, 0.0) + credit, 6)
-                site_day[model] = round(site_day.get(model, 0.0) + credit, 6)
-        group["total_credits"] += float(snap.get("total_credits") or 0)
-        group["requests"] += int(snap.get("requests") or 0)
-        used += float(snap.get("total_credits") or 0)
-        count += int(snap.get("requests") or 0)
-        newest = max(newest, float(snap.get("fetched_at") or 0))
-        # `partial` is the aggregate "this view is incomplete" flag the dashboard shows, so a
-        # failed or not-yet-refreshed account sets it; `stale_accounts` names which ones.
-        if snap.get("partial") or snap.get("stale"):
-            partial = True
-        if snap.get("stale"):
-            stale_out.add(Path(cred_id).name)
-    # Failed enabled accounts must remain visible even without a prior snapshot.
-    for cred_id in stale:
-        if cred_id in enabled:
-            partial = True
-            stale_out.add(Path(cred_id).name)
-    # A zero timestamp preserves quota-difference fallback when no usage snapshot exists.
-    for group in groups.values():
-        group["total_credits"] = round(group["total_credits"], 2)
-    out = {"by_day": by_day, "groups": groups, "total_credits": round(used, 2),
-           "requests": count, "fetched_at": newest, "partial": partial}
-    if stale_out:
-        out["stale_accounts"] = sorted(stale_out)
-    CONFIG["usage_daily"] = out
+    # CredentialPool.forget_usage removes entries from the live map under the pool lock, so the
+    # snapshot taken here and the pruning inside the loop must hold that same lock. Copying the
+    # keys and then indexing the live dictionary would otherwise raise KeyError when a credential
+    # is deleted or replaced while a usage-maintenance pass is running.
+    with pool._lock:
+        accounts = CONFIG.get("usage_daily_accounts")
+        if not isinstance(accounts, dict):
+            accounts = {}
+            CONFIG["usage_daily_accounts"] = accounts
+        # Seed from the on-disk cache so the dashboard is not blank until the first refresh.
+        snapshots = CONFIG.get("usage_snapshots")
+        if snapshots is not None:
+            _adopt_cached_usage(pool, snapshots, accounts)
+        enabled = {e["id"] for e in pool.entries() if model_policy.credential_enabled(CONFIG, e)}
+        # Aggregate from a consistent local copy of the live map rather than indexing it per row.
+        rows = dict(accounts)
+        by_day, groups = {}, {}
+        used, count = 0.0, 0
+        partial = False          # Upstream paging hid additional usage for some account.
+        stale_out = set()        # Accounts whose displayed figures are not from this run.
+        newest = 0.0
+        for cred_id, snap in rows.items():
+            if cred_id not in enabled:
+                continue
+            if _usage_row_expired(snap):
+                accounts.pop(cred_id, None)  # Drop it from the live map, not just from this sum.
+                continue
+            site = snap.get("site") or "domestic"
+            group = groups.setdefault(site, {"by_day": {}, "total_credits": 0.0, "requests": 0})
+            for day, models in (snap.get("by_day") or {}).items():
+                total_day = by_day.setdefault(day, {})
+                site_day = group["by_day"].setdefault(day, {})
+                for model, credit in models.items():
+                    total_day[model] = round(total_day.get(model, 0.0) + credit, 6)
+                    site_day[model] = round(site_day.get(model, 0.0) + credit, 6)
+            group["total_credits"] += float(snap.get("total_credits") or 0)
+            group["requests"] += int(snap.get("requests") or 0)
+            used += float(snap.get("total_credits") or 0)
+            count += int(snap.get("requests") or 0)
+            newest = max(newest, float(snap.get("fetched_at") or 0))
+            # `partial` is the aggregate "this view is incomplete" flag the dashboard shows, so a
+            # failed or not-yet-refreshed account sets it; `stale_accounts` names which ones.
+            if snap.get("partial") or snap.get("stale"):
+                partial = True
+            if snap.get("stale"):
+                stale_out.add(Path(cred_id).name)
+        # Failed enabled accounts must remain visible even without a prior snapshot.
+        for cred_id in stale:
+            if cred_id in enabled:
+                partial = True
+                stale_out.add(Path(cred_id).name)
+        # A zero timestamp preserves quota-difference fallback when no usage snapshot exists.
+        for group in groups.values():
+            group["total_credits"] = round(group["total_credits"], 2)
+        out = {"by_day": by_day, "groups": groups, "total_credits": round(used, 2),
+               "requests": count, "fetched_at": newest, "partial": partial}
+        if stale_out:
+            out["stale_accounts"] = sorted(stale_out)
+        CONFIG["usage_daily"] = out
     _log(f"[usage] 明细已同步: {count} 请求 / {used:.2f} credits"
          + (f" | {len(stale_out)} 账号同步失败" if stale_out else ""))
 

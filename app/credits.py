@@ -754,8 +754,10 @@ class ModelCatalogCache:
 
     def _load(self):
         with self._lock:
+            d = (self._store.get("catalog") or self._data) if self._store is not None else None
             try:
-                d = (self._store.get("catalog") or self._data) if self._store is not None else json.loads(self.path.read_text(encoding="utf-8"))
+                if self._store is None:
+                    d = json.loads(self.path.read_text(encoding="utf-8"))
                 if (not isinstance(d, dict) or d.get("version") not in (1, self.SCHEMA_VERSION)
                         or not isinstance(d.get("groups"), dict)):
                     return

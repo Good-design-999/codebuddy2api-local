@@ -68,6 +68,8 @@ uv run converter.py
 
 Local startup does not require `.env`. Without an explicit key, the first loopback startup generates a `cb-…` default key in `auth/control.sqlite3` and displays it once in the interactive terminal after listening succeeds. Restarts reuse it without printing it again. Keep it safe: management and API requests share this key. Configure a key explicitly for first-time headless or non-loopback deployment.
 
+One-time disclosure goes directly to the controlling terminal (`/dev/tty` or Windows `CONOUT$`), not stdout/stderr; redirecting standard output does not capture the key. Terminal recording remains outside the gateway's control.
+
 Without uv, run `python3 -m venv .venv`, activate it, install dependencies with `pip install --require-hashes --only-binary=:all: -r requirements.txt`, then run `python3 converter.py`. Distribution archives include the WebUI; source installs still need the frontend build.
 
 Both commands optionally read `.env` in the current working directory, never parent directories. Precedence: explicit CLI > process environment > `.env` > saved SQLite values > defaults. Overrides do not replace the saved default key; an explicitly empty key still locks management. Listener changes require restart; `CODEBUDDY2API_IMAGE/AUTH_PATH` are Compose-only.
@@ -75,6 +77,8 @@ Both commands optionally read `.env` in the current working directory, never par
 ### Upgrade and state migration
 
 Stop the gateway and back up the entire data directory first. Startup imports legacy JSON sessions, cooldowns, credit/trial history, catalogs and usage into `control.sqlite3` once. Old files remain as backups and are no longer read or updated. Invalid critical state or a failed migration stops startup; repair it or restore a backup rather than deleting ledgers to bypass validation.
+
+SQLite state read/validation failures stop startup without deleting sessions or replacing state with empty defaults. Repair the control database before retrying; only rebuildable cache write failures may retain the current in-memory data with a warning.
 
 All runtime logs use `logs.sqlite3`; legacy `--log` / `CODEBUDDY2API_LOG` settings warn and no longer write text files. Generated keys enter private configuration, never logs. Restrict access to the data directory; use a private user directory on Windows.
 

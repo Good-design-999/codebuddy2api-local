@@ -68,6 +68,8 @@ uv run converter.py
 
 本地启动无需 `.env`。没有显式 key 时，首次回环启动会生成 `cb-…` 默认密钥，保存到 `auth/control.sqlite3`，监听成功后仅在交互终端显示一次；以后重启复用且不再打印。请妥善保存，管理登录与 API 请求共用。首次后台或非回环部署请显式配置 key。
 
+密码提示直接写入控制终端（`/dev/tty` 或 Windows `CONOUT$`），不经过 stdout/stderr，重定向标准输出不会收集密码；外部终端录制不在程序控制范围内。
+
 没有 uv 时：运行 `python3 -m venv .venv` 并激活，用 `pip install --require-hashes --only-binary=:all: -r requirements.txt` 安装依赖，再执行 `python3 converter.py`。发行包已包含 WebUI；源码安装仍需构建界面。
 
 两种启动方式均可选读取当前工作目录的 `.env`，不搜索父目录。优先级：显式 CLI > 进程环境变量 > `.env` > SQLite 保存值 > 默认值。覆盖不改写已保存的默认 key；显式空 key 仍锁定管理。修改监听需重启，`CODEBUDDY2API_IMAGE/AUTH_PATH` 仅用于 Compose。
@@ -75,6 +77,8 @@ uv run converter.py
 ### 升级与数据迁移
 
 升级前停止网关并备份整个数据目录。首次启动将旧 JSON 会话、冷却、积分/领取、目录和用量状态一次性导入 `control.sqlite3`；原文件保留作备份，不再参与读写。关键数据损坏或迁移失败会阻止启动，请修复或恢复备份，不要删除账本绕过检查。
+
+SQLite 状态读取或校验失败会阻止启动，不删除会话、不回退为空状态；修复控制库后再启动。仅可重建缓存的写入失败允许保留当前内存数据并告警。
 
 所有运行日志使用 `logs.sqlite3`；旧 `--log` / `CODEBUDDY2API_LOG` 仅提示弃用，不再输出文本文件。自动生成的 key 只进私有配置，不进任何日志。限制数据目录访问权限；Windows 应使用当前用户的私有目录。
 

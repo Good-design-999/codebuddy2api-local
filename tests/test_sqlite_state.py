@@ -42,6 +42,12 @@ class SQLiteStateTests(unittest.TestCase):
         self.control = self.open_control()
         self.state = self.control.state
         self.now = time.time()
+        self.console_open = self.enterContext(patch("app.startup.terminal_stream", side_effect=OSError("no fixture terminal")))
+
+    def console(self):
+        terminal = Terminal()
+        self.console_open.side_effect = lambda: contextlib.nullcontext(terminal)
+        return terminal
 
     def open_control(self):
         control = ControlStore(self.root / "control.sqlite3")
@@ -173,6 +179,50 @@ class SQLiteStateTests(unittest.TestCase):
         self.assertEqual(catalogs.models("account:version"), [{"id": "model"}])
 
 
+    def test_sqlite_session_read_failure_preserves_record_and_retries_epoch(self):
+        self.create_legacy()
+        self.state.migrate(self.root)
+        before = self.state.get("sessions")
+        for error in (sqlite3.OperationalError("locked"), sqlite3.DatabaseError("malformed"),
+                      OSError("unreadable"), ValueError("invalid state")):
+            auth = AdminAuth({"api_key": FIXED_KEY, "state_store": self.state})
+            with self.subTest(error=type(error).__name__), \
+                 patch.object(self.state, "get", side_effect=error), \
+                 patch.object(self.state, "delete") as delete:
+                for attempt in (auth.reconcile, auth.enabled):
+                    with self.assertRaises(SessionStoreError):
+                        attempt()
+                    self.assertIsNone(auth._configured_key)
+                    self.assertFalse(auth.sessions)
+                delete.assert_not_called()
+                self.assertEqual(auth.storage()["last_error"], type(error).__name__)
+            self.assertEqual(self.state.get("sessions"), before)
+            auth.reconcile()
+            self.assertEqual(auth._configured_key, FIXED_KEY)
+            self.assertEqual(set(auth.sessions), set(before["sessions"]))
+            self.assertFalse(auth.storage()["degraded"])
+
+    def test_invalid_sqlite_sessions_stop_startup_without_deleting_evidence(self):
+        self.control._db.execute("INSERT INTO runtime_state VALUES('sessions', 'invalid-json')")
+        auth = AdminAuth({"api_key": FIXED_KEY, "state_store": self.state})
+        with self.assertRaises(SessionStoreError):
+            auth.reconcile()
+        self.assertIsNone(auth._configured_key)
+        self.assertEqual(self.control._db.execute("SELECT payload FROM runtime_state WHERE name='sessions'").fetchone()[0],
+                         "invalid-json")
+
+    def test_all_sqlite_loaders_propagate_read_failures_without_empty_fallbacks(self):
+        loaders = (lambda: CreditLedger(store=self.state), lambda: ModelCatalogCache(store=self.state),
+                   lambda: ModelBlocks(store=self.state), lambda: CredentialCooldowns(store=self.state),
+                   lambda: UsageSnapshots(store=self.state), lambda: TrialLedger(store=self.state).snapshot())
+        for error in (sqlite3.OperationalError("locked"), ValueError("invalid state"), OSError("unreadable")):
+            for loader in loaders:
+                with self.subTest(error=type(error).__name__, loader=loader), \
+                     patch.object(self.state, "get", side_effect=error):
+                    with self.assertRaises(type(error)):
+                        loader()
+
+
     def test_session_revocation_failure_does_not_activate_new_key(self):
         auth = AdminAuth({"api_key": FIXED_KEY, "state_store": self.state})
         auth.reconcile()
@@ -210,8 +260,8 @@ class SQLiteStateTests(unittest.TestCase):
 
     def test_key_is_announced_once_only_after_successful_commit(self):
         config = self.config()
-        terminal = Terminal()
-        with patch("sys.stderr", terminal):
+        terminal = self.console()
+        with patch("sys.stderr", io.StringIO()) as output:
             resolve_startup_key(config, SimpleNamespace(api_key=""))
             key = config["api_key"]
             self.assertEqual(terminal.getvalue(), "")
@@ -221,11 +271,33 @@ class SQLiteStateTests(unittest.TestCase):
             resolve_startup_key(again, SimpleNamespace(api_key=""))
             announce_default_key(again)
         self.assertEqual(terminal.getvalue().count(key), 1)
+        self.assertNotIn(key, output.getvalue())
         self.assertEqual(again["api_key"], key)
         self.assertIsNone(next(row for row in resolve_settings(config) if row["key"] == "api_key")["value"])
         self.assertNotIn(key, sanitize_log_text("key leaked " + key))
         with patch("sys.stderr", io.StringIO()):
             resolve_startup_key(self.config(), SimpleNamespace(api_key=""))
+
+    def test_missing_terminal_at_disclosure_does_not_consume_announcement(self):
+        terminal = self.console()
+        config = self.config()
+        resolve_startup_key(config, SimpleNamespace(api_key=""))
+        self.console_open.side_effect = OSError("terminal gone")
+        with self.assertRaises(OSError):
+            announce_default_key(config)
+        self.assertEqual(self.state.default_key(), (config["api_key"], True))
+        self.assertEqual(terminal.getvalue(), "")
+
+    def test_announcement_commit_failure_never_writes_terminal(self):
+        terminal = self.console()
+        config = self.config()
+        resolve_startup_key(config, SimpleNamespace(api_key=""))
+        with patch.object(self.state, "claim_announcement", side_effect=sqlite3.OperationalError("locked")), \
+             self.assertRaises(sqlite3.OperationalError):
+            announce_default_key(config)
+        self.assertEqual(terminal.getvalue(), "")
+        self.assertEqual(self.state.default_key(), (config["api_key"], True))
+
 
     def test_explicit_sources_do_not_overwrite_saved_default_or_print(self):
         key, _ = self.state.default_key(create=True)
@@ -279,6 +351,7 @@ class SQLiteStateTests(unittest.TestCase):
 
         def boot(env=None, flags=()):
             observed = {}
+            terminal = self.console()
             with contextlib.chdir(self.root), contextlib.ExitStack() as stack:
                 stack.enter_context(patch.dict(os.environ, {"HOME": str(self.root), "CODEBUDDY_AUTH_DIR": str(self.root), **(env or {})}, clear=True))
                 stack.enter_context(patch.dict(converter.CONFIG))
@@ -296,11 +369,13 @@ class SQLiteStateTests(unittest.TestCase):
                 stack.enter_context(patch.object(converter, "run_server", side_effect=serve))
                 converter.main()
                 observed["output"] = output.getvalue()
+                observed["terminal"] = terminal.getvalue()
             return observed
 
         first = boot()
         key = first["key"]
-        self.assertEqual(first["output"].count(key), 1)
+        self.assertEqual(first["terminal"].count(key), 1)
+        self.assertNotIn(key, first["output"])
         self.assertEqual(first["sources"]["api_key"], "generated")
         envfile = self.root / ".env"
         envfile.write_text("CODEBUDDY2API_PORT=9092\nCODEBUDDY2API_KEY=file-fixture\n")
@@ -315,6 +390,7 @@ class SQLiteStateTests(unittest.TestCase):
         resumed = boot()
         self.assertEqual(resumed["key"], key)
         self.assertNotIn(key, resumed["output"])
+        self.assertEqual(resumed["terminal"], "")
         self.assertEqual(self.state.default_key(), (key, False))
         self.assertFalse(list(self.root.glob("*.json")))
 
@@ -325,7 +401,8 @@ class SQLiteStateTests(unittest.TestCase):
         from unittest.mock import AsyncMock
         from app.startup import run_server
         config = self.config()
-        with patch("sys.stderr", Terminal()) as terminal:
+        terminal = self.console()
+        with patch("sys.stderr", io.StringIO()):
             resolve_startup_key(config, SimpleNamespace(api_key=""))
             key = config["api_key"]
             with patch.object(uvicorn.Server, "startup", new=AsyncMock(side_effect=SystemExit(3))), \

@@ -5,7 +5,6 @@ import io
 import os
 from pathlib import Path
 import stat
-import sys
 
 from dotenv import load_dotenv
 from dotenv.parser import parse_stream
@@ -41,6 +40,19 @@ def load_startup_env(path=None):
     return set(os.environ) - previous
 
 
+def terminal_stream():
+    """Open the controlling terminal, never a redirected standard stream or regular file."""
+    device = "CONOUT$" if os.name == "nt" else "/dev/tty"
+    fd = os.open(device, os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NOCTTY", 0))
+    try:
+        if not stat.S_ISCHR(os.fstat(fd).st_mode) or not os.isatty(fd):
+            raise OSError("No interactive console")
+        return os.fdopen(fd, "w", encoding="utf-8", buffering=1)
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def resolve_startup_key(config, args, dotenv_keys=()):
     sources = config["settings_sources"]
     for name, spec in SCHEMA.items():
@@ -51,27 +63,29 @@ def resolve_startup_key(config, args, dotenv_keys=()):
         return
     store = config["state_store"]
     key, pending = store.default_key()
+    if key is None and config["host"] not in ("127.0.0.1", "::1", "localhost"):
+        raise ValueError("非回环监听请显式设置 API key；默认密钥仅在本地首次启动时生成")
+    if key is None or pending:
+        try:
+            with terminal_stream():
+                pass
+        except OSError:
+            raise ValueError("首次显示默认 API key 需要交互终端；后台运行请显式配置 CODEBUDDY2API_KEY") from None
     if key is None:
-        if config["host"] not in ("127.0.0.1", "::1", "localhost"):
-            raise ValueError("非回环监听请显式设置 API key；默认密钥仅在本地首次启动时生成")
-        if not sys.stderr.isatty():
-            raise ValueError("首次生成 API key 需要交互终端；后台运行请显式配置 CODEBUDDY2API_KEY")
         key, pending = store.default_key(create=True)
-    if pending and not sys.stderr.isatty():
-        raise ValueError("默认 API key 尚未显示；请先在交互终端启动，或显式配置 CODEBUDDY2API_KEY")
     config["api_key"] = args.api_key = key
     sources["api_key"] = "generated"
     config["announce_default_key"] = pending
 
 
 def announce_default_key(config):
-    if not config.get("announce_default_key") or not sys.stderr.isatty():
+    if not config.get("announce_default_key"):
         return
-    key = config["api_key"]
-    if config["state_store"].claim_announcement(key):
-        # This is deliberately outside every logging/audit path.
-        sys.stderr.write(f"\n默认 API key：{key}\n已保存到 control.sqlite3，仅显示这一次；管理登录与 API 请求共用。\n")
-        sys.stderr.flush()
+    with terminal_stream() as terminal:
+        key = config["api_key"]
+        if config["state_store"].claim_announcement(key):
+            terminal.write(f"\n默认 API key：{key}\n已保存到 control.sqlite3，仅显示这一次；管理登录与 API 请求共用。\n")
+            terminal.flush()
     config["announce_default_key"] = False
 
 

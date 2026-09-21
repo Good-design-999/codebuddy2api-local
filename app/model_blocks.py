@@ -29,14 +29,14 @@ class ModelBlocks:
     # Persistence
 
     def _load(self):
-        try:
-            if self._store is not None:
-                data = self._store.get("model_blocks")
-            else:
+        if self._store is not None:
+            data = self._store.get("model_blocks")
+        else:
+            try:
                 with open(self.path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-        except (OSError, ValueError):
-            return
+            except (OSError, ValueError):
+                return
         if not isinstance(data, dict):
             return
         out: dict[str, dict] = {}

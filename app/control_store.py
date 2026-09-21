@@ -110,7 +110,7 @@ class ControlStore:
             self._db.execute("CREATE TABLE IF NOT EXISTS runtime_state (name TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             self._db.execute("CREATE TABLE IF NOT EXISTS state_imports (name TEXT PRIMARY KEY, imported INTEGER NOT NULL, migrated_at REAL NOT NULL)")
             self._db.execute("CREATE TABLE IF NOT EXISTS gateway_secrets (name TEXT PRIMARY KEY, value TEXT NOT NULL, announced INTEGER NOT NULL DEFAULT 0 CHECK(announced IN (0,1)))")
-            self._db.execute(f"PRAGMA user_version={self.SCHEMA_VERSION}")
+            self._db.execute("PRAGMA user_version=2")
             self._db.execute("COMMIT")
         except Exception:
             if self._db.in_transaction:

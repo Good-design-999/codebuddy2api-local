@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sqlite3
 import stat
 import tempfile
 import threading
@@ -132,7 +133,8 @@ class AdminAuth:
         self.failures = OrderedDict()
         self._configured_key = None
         self._identity = None
-        self._path = _session_path(config.get("session_path"))
+        self._store = config.get("state_store")
+        self._path = self._store.path if self._store is not None else _session_path(config.get("session_path"))
         self._storage_error = None  # Set when the snapshot could not be written or cleared.
 
     @staticmethod
@@ -179,6 +181,14 @@ class AdminAuth:
 
     def _revoke(self):
         """Revoke the persisted snapshot; returns False when it could not be cleared."""
+        if self._store is not None:
+            try:
+                self._store.delete("sessions")
+            except (OSError, ValueError, sqlite3.Error) as error:
+                self._storage_failed(error)
+                return False
+            self._storage_ok()
+            return True
         if self._path is None:
             return True
         try:
@@ -209,6 +219,12 @@ class AdminAuth:
         Returns False when a snapshot exists that cannot be trusted or validated,
         so the caller revokes it instead of leaving it available to a later start.
         """
+        if self._store is not None:
+            try:
+                document = self._store.get("sessions")
+                return True if document is None else self._adopt(document, key)
+            except (OSError, ValueError, sqlite3.Error):
+                return False
         if self._path is None:
             return True
         try:
@@ -237,6 +253,9 @@ class AdminAuth:
         except (ValueError, UnicodeDecodeError, RecursionError):
             # RecursionError: size-bounded but deeply nested JSON still exhausts the parser.
             return False
+        return self._adopt(document, key)
+
+    def _adopt(self, document, key):
         if (not isinstance(document, dict) or set(document) != {"version", "fingerprint", "sessions"}
                 or type(document["version"]) is not int or document["version"] != SESSION_FILE_VERSION):
             return False
@@ -280,6 +299,14 @@ class AdminAuth:
         document = {"version": SESSION_FILE_VERSION, "fingerprint": self._fingerprint(self._configured_key),
                     "sessions": {sid: {"csrf_token": item["csrf_token"], "expires": item["expires"]}
                                  for sid, item in self.sessions.items()}}
+        if self._store is not None:
+            try:
+                self._store.put("sessions", document)
+                self._storage_ok()
+                return True
+            except (OSError, ValueError, sqlite3.Error) as error:
+                self._storage_failed(error)
+                return self._revoke()
         try:
             content = json.dumps(document, ensure_ascii=False, separators=(",", ":"),
                                  allow_nan=False).encode("utf-8")

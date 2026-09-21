@@ -59,16 +59,19 @@ class UnavailableAudit:
         pass
 
 
-def initialize(gateway, args, argv=None, *, parser=None):
+def initialize(gateway, args, argv=None, *, parser=None, dotenv_keys=()):
     config = gateway.CONFIG
     config["auto_accept_buddy"] = buddy.auto_accept_from_env(os.environ)
     config["auto_accept_buddy_source"] = "environment" if "CODEBUDDY2API_AUTO_ACCEPT_BUDDY" in os.environ else "default"
     root = gateway.managed_auth_dir()
     control = ControlStore(root / "control.sqlite3")
     config["control_store"] = control
-    # Persist management sessions so a restart does not force another API-key login.
-    # The file stores an HMAC fingerprint of the key epoch, so key rotation still revokes them.
-    config["session_path"] = root / "admin-sessions.json"
+    config["state_store"] = control.state
+    try:
+        control.state.migrate(root)
+    except BaseException:
+        control.close()
+        raise
     config.update(vars(args))
     config["model_guard"] = not args.no_model_guard
     aliases = {"log": "log_path", "no_model_guard": "model_guard"}
@@ -82,10 +85,16 @@ def initialize(gateway, args, argv=None, *, parser=None):
             key = options[matches[0]].dest if len(matches) == 1 else flag[2:].replace("-", "_")
             explicit.add(aliases.get(key, key))
     apply_persisted_settings(config, explicit=explicit)
+    from .startup import resolve_startup_key
+    try:
+        resolve_startup_key(config, args, dotenv_keys)
+    except BaseException:
+        control.close()
+        raise
     for key in SCHEMA:
         if hasattr(args, key) and key != "api_key":
             setattr(args, key, config[key])
-    config["trial_ledger"] = gateway.trial_rewards.TrialLedger(root / "trial-ledger.json")
+    config["trial_ledger"] = gateway.trial_rewards.TrialLedger(store=control.state)
     try:
         config["audit_store"] = AuditStore(root / "logs.sqlite3", max_bytes=config["audit_max_bytes"],
                                             retention_days=config["audit_retention_days"],

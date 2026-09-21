@@ -27,7 +27,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exception_handlers import http_exception_handler as _default_http_exception_handler
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.concurrency import run_in_threadpool
-import uvicorn
+import uvicorn as uvicorn  # Keep the existing embedding/test hook.
 
 try:
     from app.desensitize import desensitize_body
@@ -72,6 +72,7 @@ from app.admin_auth import SessionStoreError
 from app.content_filter import ContentFilterDetector, is_filter_error
 from app.request_limits import ImageLimitError, apply_image_policy
 from app.safe_logging import format_log_body, sanitize_log_text
+from app.startup import load_startup_env, run_server
 from app.site_routing import (DOMESTIC, INTERNATIONAL, PROFILE_ENDPOINTS, site_for_auth, site_for_headers,
                               profile_for_auth, profile_for_headers, profile_region, profile_product,
                               profile_site, chat_url_for_headers, refresh_url_for_auth)
@@ -466,15 +467,15 @@ class CredentialPool:
     """Manage credential discovery, reloads, sticky sessions, cooldowns and refresh."""
 
     def __init__(self, paths: list[Path] | None = None, scan: bool = False,
-                 blocks_path: Path | None = None, cooldowns_path: Path | None = None):
+                 blocks_path: Path | None = None, cooldowns_path: Path | None = None, *, state_store=None):
         self._lock = threading.RLock()
         self._entries: list[dict] = []   # {id, cm, fail_until}
         self._sticky: "OrderedDict[str, tuple[str, float]]" = OrderedDict()
         self._model_fail: dict[tuple[str, str], float] = {}  # Per-credential/model 429 expiry
         # Keep unsupported-model backoff isolated by backend and model.
-        self._blocks = ModelBlocks(blocks_path, ttl_s=MODEL_SITE_BLOCK_S, max_ttl_s=MODEL_SITE_BLOCK_MAX_S)
+        self._blocks = ModelBlocks(blocks_path, ttl_s=MODEL_SITE_BLOCK_S, max_ttl_s=MODEL_SITE_BLOCK_MAX_S, store=state_store)
         # Cooldowns outlive a restart so a backend that just refused is not retried immediately.
-        self._cooldowns = CredentialCooldowns(cooldowns_path)
+        self._cooldowns = CredentialCooldowns(cooldowns_path, store=state_store)
         self._storage_warned = 0.0   # Rate limit for persistence-failure warnings
         self._rr = {None: 0, "cn": 0, "intl": 0}
         self._ledger = None              # Prefer credits expiring sooner.
@@ -1795,48 +1796,19 @@ _OAUTH = auth_oauth.OAuthManager(user_agent=USER_AGENT)
 
 
 # ---------------------------------------------------------------------------
-# File logging
+# Runtime audit events
 # ---------------------------------------------------------------------------
 
-_LOG_LOCK = threading.Lock()
-LOG_MAX_BYTES = 50 * 1024 * 1024  # Rotation threshold; a single entry may exceed it.
-LOG_BACKUPS = 2                    # Retain the two most recent rotated logs.
 
 
 def _log(msg: str):
-    """Write bounded redacted logs with rotation under a shared lock."""
+    """Persist allowlisted runtime events in SQLite, never free-form text or secrets."""
     audit = CONFIG.get("audit_store")
     component = re.match(r"\[(cred|credits|models|usage|trial|checkin|housekeeper)\]", msg)
     if audit is not None and component:
         # Persist event codes, not free-form lines which may contain upstream data.
         code = "cooldown" if "熔断" in msg or "冷却" in msg else "failure" if "失败" in msg or "异常" in msg else "updated"
         audit.event("runtime", component.group(1), {"code": code})
-    path = CONFIG.get("log_path")
-    if not path:
-        return
-    budget = min(max(1024, CONFIG.get("log_body_limit", 65536) + 256), max(0, LOG_MAX_BYTES - 256))
-    msg = sanitize_log_text(msg, budget)
-    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n"
-    try:
-        with _LOG_LOCK:
-            try:
-                size = os.path.getsize(path)
-            except FileNotFoundError:
-                size = 0
-            rotated = size > 0 and size + len(line.encode("utf-8")) > LOG_MAX_BYTES
-            if rotated:
-                for i in range(LOG_BACKUPS - 1, 0, -1):
-                    old = f"{path}.{i}"
-                    if os.path.exists(old):
-                        os.replace(old, f"{path}.{i + 1}")
-                os.replace(path, f"{path}.1")
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            with os.fdopen(fd, "a", encoding="utf-8", newline="\n") as stream:
-                if rotated:
-                    stream.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ==== 日志轮转 ====\n")
-                stream.write(line)
-    except OSError:
-        pass  # Logging failures must not interrupt requests.
 
 
 def _log_json(label: str, value):
@@ -3777,6 +3749,7 @@ def _boolean_arg(value):
 
 
 def main():
+    dotenv_keys = set() if any(arg in ("-h", "--help") for arg in sys.argv[1:]) else load_startup_env()
     ap = argparse.ArgumentParser(description="CodeBuddy -> OpenAI 兼容转换器（直连后端）")
     ap.add_argument("command", nargs="?", choices=("serve", "login"), default="serve",
                     help="serve 启动服务（默认）；login 扫码登录、自动轮询并保存账号")
@@ -3787,7 +3760,7 @@ def main():
     ap.add_argument("--host", default="127.0.0.1", help="监听地址；覆盖 CODEBUDDY2API_BIND")
     ap.add_argument("--port", type=int, default=8787, help="监听端口；覆盖 CODEBUDDY2API_PORT")
     ap.add_argument("--api-key", default=os.environ.get("CODEBUDDY2API_KEY", ""),
-                    help="可选：要求客户端携带的 API key（默认不校验）")
+                    help="管理与推理密钥；未配置时首次本地交互启动生成并保存")
     ap.add_argument("--admin-csrf", type=_boolean_arg, nargs="?", const=True,
                     default=os.environ.get("CODEBUDDY2API_ADMIN_CSRF", "true"),
                     help="管理 Origin/CSRF 校验，默认 true；仅在受信任本地环境设为 false，鉴权仍启用")
@@ -3796,8 +3769,7 @@ def main():
                     help="额外信任的管理页来源（逗号分隔，支持域名或完整来源，裸域名按 https）；"
                          "反代 HTTPS 域名登录报 Origin 校验失败时设置，也可在 WebUI 配置")
     ap.add_argument("--log", default=None, metavar="PATH",
-                    help="额外写入兼容文本日志（如 --log converter.log 或 --log /tmp/cb.log）。"
-                         "不传仍记录 SQLite 审计，但不输出文本文件。")
+                    help="已停用：日志统一保存到数据目录中的 logs.sqlite3")
     ap.add_argument("--desensitize", action="store_true",
                     help="适配固定 CLI 模板、压缩运行时提示并零宽脱敏关键词。默认关闭。")
     ap.add_argument("--no-compact", action="store_true",
@@ -3851,7 +3823,7 @@ def main():
                     help="按账号模型声明预检图片、工具、思考和输出上限；false 仅关闭新增能力预检")
     ap.add_argument("--log-body-limit", type=_nonnegative_int, metavar="BYTES",
                     default=os.environ.get("CODEBUDDY2API_LOG_BODY_LIMIT", "65536"),
-                    help="每条正文日志的预览字节上限，默认 64 KiB；0 只记录摘要")
+                    help="旧文本预览兼容项；文本输出已停用，SQLite 诊断使用独立预算")
     ap.add_argument("--tool-call-max-retry", type=_nonnegative_int, metavar="N",
                     default=os.environ.get("CODEBUDDY2API_TOOL_CALL_MAX_RETRY", "3"),
                     help="工具参数损坏时的额外生成上限，默认 3；0 表示不重试（每次额外生成都消耗额度）")
@@ -3888,10 +3860,11 @@ def main():
     CONFIG["usd_rate"] = args.usd_rate or None
     CONFIG["credit_price_usd"] = args.credit_price_usd or None
     CONFIG["model_guard"] = not args.no_model_guard
-    # File logging is enabled only when a path is configured.
-    CONFIG["log_path"] = args.log if args.log else os.environ.get("CODEBUDDY2API_LOG")
+    if args.log is not None or os.environ.get("CODEBUDDY2API_LOG"):
+        sys.stderr.write("[log] --log / CODEBUDDY2API_LOG 已停用；请在 WebUI 查看 SQLite 日志。\n")
+    CONFIG["log_path"] = None
     from app import runtime_management
-    runtime_management.initialize(sys.modules[__name__], args, parser=ap)
+    runtime_management.initialize(sys.modules[__name__], args, parser=ap, dotenv_keys=dotenv_keys)
     # Validate effective binding and authentication before credential scans or background work.
     if (args.host not in ("127.0.0.1", "::1", "localhost") and not CONFIG.get("api_key")
             and os.environ.get("CODEBUDDY2API_ALLOW_OPEN_NOAUTH", "").lower() not in ("1", "true", "yes")):
@@ -3901,17 +3874,14 @@ def main():
     files = [Path(p) for p in args.auth_file]
     if not files:
         seed_credentials()  # Seed missing desktop credentials into managed storage.
-    CONFIG["cred_pool"] = CredentialPool(files, scan=not files,
-                                         blocks_path=managed_auth_dir() / "model-site-blocks.json",
-                                         cooldowns_path=managed_auth_dir() / "credential-cooldowns.json")
-    CONFIG["usage_snapshots"] = UsageSnapshots(managed_auth_dir() / "usage-snapshots.json")
+    CONFIG["cred_pool"] = CredentialPool(files, scan=not files, state_store=CONFIG["state_store"])
+    CONFIG["usage_snapshots"] = UsageSnapshots(store=CONFIG["state_store"])
     CONFIG["cred"] = CONFIG["cred_pool"].first()
     CONFIG["account_catalogs"] = {}  # Disable static fallback before maintenance starts.
     if credits_mod is not None:
-        ledger = credits_mod.CreditLedger(managed_auth_dir() / "credits-ledger.json")
+        ledger = credits_mod.CreditLedger(store=CONFIG["state_store"])
         CONFIG["ledger"] = ledger
-        CONFIG["model_cache"] = credits_mod.ModelCatalogCache(
-            managed_auth_dir() / "model-catalog.json", ttl=args.model_catalog_ttl)
+        CONFIG["model_cache"] = credits_mod.ModelCatalogCache(ttl=args.model_catalog_ttl, store=CONFIG["state_store"])
         CONFIG["cred_pool"].set_ledger(ledger)  # Verify balance ownership before publishing catalogs.
     _publish_model_cache()
     # Publish cached usage before maintenance threads start, so the dashboard is populated from
@@ -3968,7 +3938,7 @@ def main():
     _log(f"==== converter 启动 ====")
 
     try:
-        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+        run_server(app, CONFIG, host=args.host, port=args.port)
     finally:
         runtime_management.close(CONFIG)
 

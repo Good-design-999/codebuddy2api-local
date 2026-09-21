@@ -6,18 +6,18 @@
 
 ## 配置与 CLI
 
-配置优先级：**显式 CLI 参数 > 环境变量 > WebUI 持久化配置 > 默认值**。WebUI 中可热更新的设置立即生效，标记为重启生效的设置需手动重启；锁定项须在启动配置中修改，WebUI 不改写 `.env`。
+配置优先级：**显式 CLI 参数 > 进程环境变量 > `.env` > SQLite 保存值 > 默认值**。热更新设置立即生效，标记为重启的项需手动重启；锁定项请在对应来源修改，WebUI 不改写 `.env` 或返回 API key 明文。
 
 Compose 会显式传入部分环境变量及 CLI 参数，删除 `.env` 中的一行不一定解除锁定。修改这些值后重建容器；若要由 WebUI 接管，还需取消 Compose 中对应的显式设置。
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--host` / `--port` | `127.0.0.1` / `8787` | 本地监听地址与端口 |
-| `--api-key` | 无 | 管理与推理共用密钥；未设置时管理锁定 |
+| `--api-key` | 已保存的默认 key | 管理与推理共用；缺失时首次本地交互启动生成并保存；显式空值锁定管理 |
 | `--admin-csrf [true/false]` | `true` | 管理 Origin/CSRF 校验；仅启动配置可关闭，API key 和会话鉴权不变 |
 | `--admin-allowed-origins` | 无 | 额外信任的管理页来源（逗号分隔，裸域名按 HTTPS），用于反代登录；热生效，可在 WebUI 配置 |
 | `--auth-file` | 扫描 `auth/` | 指定凭据文件，可重复传入；不再扫描其他文件 |
-| `--log` | 无 | 额外文本日志，50 MiB 轮转、保留 2 份；不影响默认 SQLite 审计 |
+| `--log` | 已停用 | 提示弃用且不写文件；日志统一在 WebUI 查看 SQLite 记录 |
 | `--desensitize` | 关 | 适配固定 CLI 模板、压缩运行时提示、零宽脱敏关键词 |
 | `--no-compact` | 关 | 配合脱敏保留主要行为指令，仍适配模板及裁剪运行时上下文；不关闭 Responses 投影 |
 | `--keep-tool-metadata [true/false]` | `false` | 保留工具描述及参数 schema 的 `description/title`，与提示词压缩独立 |
@@ -40,7 +40,7 @@ Compose 会显式传入部分环境变量及 CLI 参数，删除 `.env` 中的�
 | `--failover-max` | `0` | 请求在「一个字节都还没发给下游」之前失败时，最多再换几个凭证就地重放；`0` 表示如实把失败回给下游 |
 | `--retry-write-timeout` | `false` | 让「写请求体超时」也参与重放（换新连接与 `--failover-max` 换凭证），代价是已发出的那半截正文可能已被上游处理 |
 | `--max-request-bytes` | `33554432` | 处理后的上游 JSON 字节上限，须为正整数 |
-| `--log-body-limit` | `65536` | 兼容文本日志正文预览字节；`0` 只记摘要，不控制 SQLite 诊断预算 |
+| `--log-body-limit` | `65536` | 旧文本预览兼容项；文本输出已停用，SQLite 诊断使用独立预算 |
 
 环境变量包括 `CODEBUDDY_AUTH_DIR`、`CODEBUDDY_IMPORT_DIR`、`CODEBUDDY2API_KEY`、`CODEBUDDY2API_ADMIN_CSRF`、`CODEBUDDY2API_ADMIN_ORIGINS`、`CODEBUDDY2API_KEEP_TOOL_METADATA`、`CODEBUDDY2API_LOG`，以及 `CODEBUDDY2API_MAX_IMAGES`、`CODEBUDDY2API_IMAGE_POLICY`、`CODEBUDDY2API_MAX_REQUEST_BYTES`、`CODEBUDDY2API_LOG_BODY_LIMIT`、`CODEBUDDY2API_FAILOVER_MAX`、`CODEBUDDY2API_RETRY_WRITE_TIMEOUT`。启动示例见[部署指南](deployment.zh-CN.md)。
 
@@ -82,7 +82,7 @@ scoped 模式可选传入 `X-Codebuddy-Session-ID`、`metadata.conversation_id` 
 
 旅行奖励领取与派遣共用按账号隔离的写入预留，不确定结果不超时重放；状态查询只回查并更新本地确认记录，不发上游写请求。存储失败停止领取和派遣，跨进程确认不覆盖其他请求的记录。
 
-体验积分仅供符合官方资格的 `intl-work` 账号手动领取：使用凭证行的领取抽屉或 `POST /admin/credentials/{id}/trial`。启动、定时维护、余额同步均不领取。结果显示安全错误类别、HTTP 状态／业务码及重试时间，响应正文限制为 64 KiB 且不返回浏览器。成功或已领取记录保存在 `auth/trial-ledger.json`，失败至少等待 24 小时才能再次手动申请；升级时保留该文件。
+体验积分仅供符合资格的 `intl-work` 账号通过凭证抽屉或 `POST /admin/credentials/{id}/trial` 手动领取，启动和维护不领取。安全结果、成功历史与请求预留保存在 `control.sqlite3`，失败保留 24 小时退避。响应正文上限 64 KiB，且不返回浏览器；升级时保留数据库。
 
 `CODEBUDDY2API_AUTO_TRIAL` 和 `--auto-trial` 已停用：旧启动选项仅提示、不触发任务；控制库中的旧布尔 `auto_trial` 设置在加载时忽略。请从部署配置中移除；回滚旧代码前也须核对这些旧设置，避免重新启用自动领取。
 
@@ -147,7 +147,7 @@ WebUI 可以直接上传文件；以下限制针对 `POST /admin/credentials` �
 
 ## 模型与调度
 
-以 WebUI 和 `GET /v1/models` 为客户端选择依据。原始目录仍按账号/租户、地域、产品与客户端版本缓存到 `auth/model-catalog.json`，默认有效期 6 小时；新凭据触发同步，刷新失败保留该账号的可信旧缓存。旧未隔离缓存不作为国际共享来源。
+以 WebUI 和 `GET /v1/models` 为客户端选择依据。原始目录按账号/租户、地域、产品与客户端版本缓存到 `auth/control.sqlite3`，默认有效期 6 小时；新凭据触发同步，刷新失败保留该账号的可信旧缓存。旧未隔离缓存不作为国际共享来源。
 
 国际 CLI／WorkBuddy 使用已启用、目录已就绪的国际账号生成去重共享视图。目标账号须完成自身目录同步；已有型号保留自己的完整声明，缺失型号才继承，并通过 `catalog_source`、安全 `source_variants` 标明来源。继承声明冲突时倍率取较高值、上限取较小值、思考选项取交集、描述类字段不一致即省略；未知倍率不当零。国内目录、凭据、余额、绑定及 `auto` 默认模型保持独立；共享倍率只是目录参考，不保证权限或实际扣分。
 

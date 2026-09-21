@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import stat
+import sqlite3
 import tempfile
 import threading
 import time
@@ -89,8 +89,9 @@ def _strict_json(raw: bytes):
 class UsageSnapshots:
     """Thread-safe, optionally persisted cache of per-account usage snapshots."""
 
-    def __init__(self, path=None):
-        self.path = str(path) if path else None
+    def __init__(self, path=None, *, store=None):
+        self._store = store
+        self.path = str(store.path) if store is not None else (str(path) if path else None)
         self._lock = threading.RLock()
         self._data: dict[str, dict] = {}
         self.last_error: str | None = None
@@ -103,26 +104,8 @@ class UsageSnapshots:
 
     def _load(self):
         """Adopt only a fully valid snapshot; anything else leaves the cache empty."""
-        try:
-            if not stat.S_ISREG(os.lstat(self.path).st_mode):
-                return
-            fd = os.open(self.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                         | getattr(os, "O_NONBLOCK", 0))
-        except OSError:
-            return
-        try:
-            with os.fdopen(fd, "rb") as stream:
-                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                    return
-                raw = stream.read(MAX_BYTES + 1)
-        except OSError:
-            return
-        if len(raw) > MAX_BYTES:
-            return
-        try:
-            document = _strict_json(raw)
-        except (ValueError, UnicodeDecodeError, RecursionError):
-            return
+        from .state_store import load_document
+        document = load_document(self.path, self._store, "usage", MAX_BYTES)
         if (not isinstance(document, dict) or set(document) != {"version", "accounts"}
                 or type(document["version"]) is not int or document["version"] != VERSION):
             return
@@ -212,6 +195,16 @@ class UsageSnapshots:
             self.last_error = "serialize"
             self._dirty = True
             return False
+        if self._store is not None:
+            try:
+                self._store.put("usage", json.loads(content))
+            except (OSError, ValueError, sqlite3.Error) as error:
+                self.last_error = type(error).__name__
+                self._dirty = True
+                return False
+            self.last_error = "capacity" if shed else None
+            self._dirty = shed
+            return not shed
         temporary = None
         try:
             directory = os.path.dirname(self.path) or "."

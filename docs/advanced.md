@@ -6,18 +6,18 @@ Use the [WebUI](webui.md) for everyday management. See [deployment](deployment.m
 
 ## Configuration and CLI
 
-Precedence: **explicit CLI flags > environment > persisted WebUI settings > defaults**. Hot settings apply immediately; restart-marked settings require a manual restart. Change locked options in the startup configuration; the WebUI does not edit `.env`.
+Precedence: **explicit CLI flags > process environment > `.env` > saved SQLite settings > defaults**. Hot settings apply immediately; restart-marked settings require a manual restart. Change locked options at their source; the WebUI does not edit `.env` or expose API keys.
 
 Compose explicitly passes some environment variables and CLI flags, so deleting a line from `.env` may not unlock it. Recreate the container after changing these values; to let the WebUI manage them, also remove the corresponding explicit Compose settings.
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--host` / `--port` | `127.0.0.1` / `8787` | Local listener |
-| `--api-key` | none | Shared management and inference key; management is locked without it |
+| `--api-key` | saved default | Shared management/inference key; first local interactive startup generates and saves one if absent; explicit empty locks management |
 | `--admin-csrf [true/false]` | `true` | Startup-only management Origin/CSRF checks; disabling does not bypass API-key or session authentication |
 | `--admin-allowed-origins` | none | Extra trusted management Origins (comma-separated; bare domains mean HTTPS) for reverse-proxy sign-in; hot and WebUI-editable |
 | `--auth-file` | scan `auth/` | Explicit credential file, repeatable; disables scanning other files |
-| `--log` | none | Additional text logs, 50 MiB rotation and 2 backups; SQLite auditing remains enabled |
+| `--log` | retired | Warns without writing a file; use SQLite logs in the WebUI |
 | `--desensitize` | off | Adapt fixed CLI templates, compact runtime prompts and mask keywords with zero-width characters |
 | `--no-compact` | off | With desensitization, retain fuller instructions while adapting templates and pruning runtime context; does not disable Responses projection |
 | `--keep-tool-metadata [true/false]` | `false` | Retain tool descriptions and parameter-schema `description/title`, independently of prompt compaction |
@@ -40,7 +40,7 @@ Compose explicitly passes some environment variables and CLI flags, so deleting 
 | `--failover-max` | `0` | Extra credentials tried when a request fails before the first response byte reaches the client; `0` keeps the upstream behaviour of surfacing the failure directly |
 | `--retry-write-timeout` | `false` | Opt a request-body write timeout into replay (fresh connection and `--failover-max`), accepting that bytes already sent may have been processed |
 | `--max-request-bytes` | `33554432` | Positive byte limit for the processed upstream JSON |
-| `--log-body-limit` | `65536` | Text-log body preview bytes; `0` logs summaries only, not the SQLite diagnostic budget |
+| `--log-body-limit` | `65536` | Legacy text-preview option; text output is retired and SQLite diagnostics use their own budget |
 
 Environment variables include `CODEBUDDY_AUTH_DIR`, `CODEBUDDY_IMPORT_DIR`, `CODEBUDDY2API_KEY`, `CODEBUDDY2API_ADMIN_CSRF`, `CODEBUDDY2API_ADMIN_ORIGINS`, `CODEBUDDY2API_KEEP_TOOL_METADATA`, `CODEBUDDY2API_LOG`, `CODEBUDDY2API_MAX_IMAGES`, `CODEBUDDY2API_IMAGE_POLICY`, `CODEBUDDY2API_MAX_REQUEST_BYTES`, `CODEBUDDY2API_LOG_BODY_LIMIT`, `CODEBUDDY2API_FAILOVER_MAX` and `CODEBUDDY2API_RETRY_WRITE_TIMEOUT`. See [deployment](deployment.md) for startup examples.
 
@@ -82,7 +82,7 @@ Manual `POST /admin/credentials/{id}/travel` returns `buddy_confirmation` with o
 
 Travel claims and departures share an account-scoped write reservation. Uncertain results do not expire or replay; fresh status reads reconcile them without issuing upstream writes. Store failures stop claims and departures, and local readback updates preserve receipt ownership across processes.
 
-Trial credits are manual-only for eligible `intl-work` accounts: use the credential row's claim drawer or `POST /admin/credentials/{id}/trial`. Startup, periodic maintenance and balance sync never claim. Results expose safe error categories, HTTP/business codes and retry time; response bodies are capped at 64 KiB and never returned to the browser. Success/already-claimed records persist in `auth/trial-ledger.json`; failures wait at least 24 hours before another manual attempt. Keep this file when upgrading.
+Trial credits are manual-only for eligible `intl-work` accounts through the credential drawer or `POST /admin/credentials/{id}/trial`; startup and maintenance never claim. Safe results, successful claims and reservations persist in `control.sqlite3`; failed attempts retain the 24-hour backoff. Response bodies are capped at 64 KiB and never returned to the browser. Preserve the database when upgrading.
 
 `CODEBUDDY2API_AUTO_TRIAL` and `--auto-trial` are retired: old startup options warn and do nothing; saved Boolean `auto_trial` settings are ignored on load. Remove them from deployment configuration. Before reverting to older code, check these old settings to avoid re-enabling automatic claims.
 
@@ -147,7 +147,7 @@ The WebUI supports direct uploads; these rules concern path imports through `POS
 
 ## Models and scheduling
 
-Select client models from the WebUI or `GET /v1/models`. Raw catalogs remain cached by account/tenant, region, product and client version in `auth/model-catalog.json`, with a default 6-hour TTL. New credentials trigger synchronization; failed refreshes retain that account's trusted cache. Legacy unscoped caches do not become international sharing sources.
+Select client models from the WebUI or `GET /v1/models`. Raw catalogs remain cached by account/tenant, region, product and client version in `auth/control.sqlite3`, with a default 6-hour TTL. New credentials trigger synchronization; failed refreshes retain that account's trusted cache. Legacy unscoped caches do not become international sharing sources.
 
 International CLI and WorkBuddy use a deduplicated shared view from enabled, catalog-ready international accounts. A target account must have its own synchronized catalog; its existing model declarations win unchanged. Missing IDs inherit shared declarations, retaining `catalog_source` and safe `source_variants`. Conflicting inherited rates use the higher known rate, limits the smaller known value, reasoning options their intersection and differing descriptive fields are omitted; unknown prices never mean free. Domestic catalogs, credentials, balances, bindings and `auto` defaults remain independent. Shared rates are catalog references, not billing or permission guarantees.
 

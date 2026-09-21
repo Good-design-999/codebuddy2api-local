@@ -21,7 +21,7 @@ _CLEANUP_SECONDS = 0.05
 METRICS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",
            "reasoning_tokens", "total_tokens", "credit")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:/@-]{1,160}$")
-_SECRET = re.compile(r"(?i)(bearer|sk-|access[_-]?token|refresh[_-]?token|api[_-]?key|eyJ|://)")
+_SECRET = re.compile(r"(?i)(bearer|sk-|cb-|access[_-]?token|refresh[_-]?token|api[_-]?key|eyJ|://)")
 
 
 def safe_label(value: Any, limit: int = 160) -> str | None:

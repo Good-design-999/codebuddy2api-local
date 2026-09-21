@@ -630,13 +630,17 @@ def fetch_request_usage(access_token: str, days: int = USAGE_MAX_DAYS,
 class CreditLedger:
     """Persist per-credential check-in and balance snapshots for expiry-aware scheduling."""
 
-    def __init__(self, path: Path):
-        self.path = Path(path)
+    def __init__(self, path: Path | None = None, *, store=None):
+        self._store = store
+        self.path = Path(store.path if store is not None else path)
         self._lock = threading.Lock()
         self._data: dict = {"version": 1, "creds": {}}
         self._load()
 
     def _load(self):
+        if self._store is not None:
+            self._data = self._store.get("credits") or {"version": 1, "creds": {}}
+            return
         try:
             self._data = json.loads(self.path.read_text(encoding="utf-8"))
             if "creds" not in self._data:
@@ -645,6 +649,9 @@ class CreditLedger:
             self._data = {"version": 1, "creds": {}}
 
     def _save(self):
+        if self._store is not None:
+            self._store.put("credits", self._data)
+            return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(self.path.suffix + ".tmp")
@@ -737,8 +744,9 @@ class ModelCatalogCache:
 
     SCHEMA_VERSION = 2
 
-    def __init__(self, path: Path, ttl: float = 6 * 3600):
-        self.path = Path(path)
+    def __init__(self, path: Path | None = None, ttl: float = 6 * 3600, *, store=None):
+        self._store = store
+        self.path = Path(store.path if store is not None else path)
         self.ttl = max(60.0, float(ttl or 0))
         self._lock = threading.Lock()
         self._data: dict = {"version": self.SCHEMA_VERSION, "groups": {}}
@@ -747,7 +755,7 @@ class ModelCatalogCache:
     def _load(self):
         with self._lock:
             try:
-                d = json.loads(self.path.read_text(encoding="utf-8"))
+                d = (self._store.get("catalog") or self._data) if self._store is not None else json.loads(self.path.read_text(encoding="utf-8"))
                 if (not isinstance(d, dict) or d.get("version") not in (1, self.SCHEMA_VERSION)
                         or not isinstance(d.get("groups"), dict)):
                     return
@@ -773,6 +781,9 @@ class ModelCatalogCache:
                 pass  # Keep the loaded catalog when disk reads fail.
 
     def _save(self):
+        if self._store is not None:
+            self._store.put_cache("catalog", self._data)
+            return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(self.path.suffix + ".tmp")

@@ -26,6 +26,7 @@ class LoginTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
         self.enterContext(patch.dict(os.environ, {"CODEBUDDY_AUTH_DIR": temporary.name}))
+        self.enterContext(patch.object(converter, "load_startup_env", return_value=set()))
         self.enterContext(patch.dict(converter.CONFIG, {"cred_pool": None, "api_key": "", "log_path": None}))
         self.stdout = self.enterContext(contextlib.redirect_stdout(io.StringIO()))
         self.stderr = self.enterContext(contextlib.redirect_stderr(io.StringIO()))

@@ -28,6 +28,8 @@ const sourceLabels: Record<string, string> = {
   cli: "命令行",
   environment: "环境变量",
   env: "环境变量",
+  dotenv: ".env 文件",
+  generated: "本地默认密钥",
   management: "管理界面",
   default: "默认值",
   internal: "内置",

@@ -52,6 +52,7 @@ class IdentitySyncTests(unittest.TestCase):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(patch.dict(os.environ, {"CODEBUDDY_AUTH_DIR": str(self.root),
             "CODEBUDDY2API_LOG": "", "CODEBUDDY2API_KEY": ""}))
+        self.enterContext(patch.object(c, "load_startup_env", return_value=set()))
         self.enterContext(patch.dict(c.CONFIG, {"cred_pool": None, "cred": None, "ledger": None,
             "model_cache": None, "model_catalogs": {}, "account_catalogs": None,
             "models_remote": None, "models_intl": None, "model_guard": True, "log_path": None}))
@@ -403,8 +404,12 @@ class IdentitySyncTests(unittest.TestCase):
         ledger = credits.CreditLedger(self.root / "credits-ledger.json")
         ledger.bind_identity(str(path), identity)
         ledger.update_credits(str(path), balance("", domain=DOMAINS["intl-cli"]))
+        from app.control_store import ControlStore
+        control = ControlStore(self.root / "control.sqlite3")
+        self.addCleanup(control.close)
+        control.state.migrate(self.root)
         for models in ([], [model("shared")]):
-            cache = credits.ModelCatalogCache(self.root / "model-catalog.json")
+            cache = credits.ModelCatalogCache(store=control.state)
             cache.put(key, models)
             cache.put("international", [model("legacy-forbidden")])
             observed = []

@@ -36,6 +36,7 @@ class EnvironmentConfigTests(unittest.TestCase):
         env.update(environ or {})
         with patch.dict(os.environ, env, clear=True), patch.dict(converter.CONFIG, dict(converter.CONFIG), clear=True), \
              patch.object(sys, 'argv', ['converter.py', '--skip-check', *cli]), \
+             patch.object(converter, 'load_startup_env', return_value=set()), \
              patch.object(converter, 'seed_credentials') as seed, patch.object(converter, 'CredentialPool') as pool, \
              patch.object(converter, '_publish_model_cache'), patch.object(runtime_management, 'install'), \
              patch.object(converter.threading, 'Thread'), patch.object(converter, '_log'), \

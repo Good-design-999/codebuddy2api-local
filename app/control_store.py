@@ -70,12 +70,13 @@ def validate_model(source, rule, models=None, known_models=(), *, legacy_scopes=
 
 
 class ControlStore:
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, path):
         path = Path(path)
         existed = path.exists()
         path = _secure_path(path)
+        self.path = path
         self._lock = threading.RLock()
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=1)
         try:
@@ -88,7 +89,7 @@ class ControlStore:
                 self._db.execute("CREATE TABLE control (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, payload TEXT NOT NULL)")
                 self._db.execute("INSERT INTO control VALUES (1,0,?)", (json.dumps({"settings": {}, "models": {}, "credentials": {}}),))
                 self._db.execute("PRAGMA user_version=1")
-            elif version != self.SCHEMA_VERSION:
+            elif version not in (1, self.SCHEMA_VERSION):
                 raise ValueError("管理数据库 schema 不受支持或已有库为空，未执行初始化")
             self._snapshot = self._load()
             self._db.execute("CREATE TABLE IF NOT EXISTS buddy_bootstrap ("
@@ -106,12 +107,18 @@ class ControlStore:
                              "accept_started INTEGER NOT NULL DEFAULT 0, chat_started INTEGER NOT NULL DEFAULT 0, "
                              "completed INTEGER NOT NULL DEFAULT 0, model TEXT, chat_state TEXT NOT NULL DEFAULT 'pending', "
                              "total_tokens INTEGER, updated_at REAL NOT NULL)")
+            self._db.execute("CREATE TABLE IF NOT EXISTS runtime_state (name TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+            self._db.execute("CREATE TABLE IF NOT EXISTS state_imports (name TEXT PRIMARY KEY, imported INTEGER NOT NULL, migrated_at REAL NOT NULL)")
+            self._db.execute("CREATE TABLE IF NOT EXISTS gateway_secrets (name TEXT PRIMARY KEY, value TEXT NOT NULL, announced INTEGER NOT NULL DEFAULT 0 CHECK(announced IN (0,1)))")
+            self._db.execute(f"PRAGMA user_version={self.SCHEMA_VERSION}")
             self._db.execute("COMMIT")
         except Exception:
             if self._db.in_transaction:
                 self._db.execute("ROLLBACK")
             self._db.close()
             raise
+        from .state_store import StateStore
+        self.state = StateStore(self)
 
     def _load(self):
         row = self._db.execute("SELECT revision,payload FROM control WHERE id=1").fetchone()

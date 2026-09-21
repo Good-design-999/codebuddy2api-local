@@ -60,7 +60,7 @@ SCHEMA = {
     "auth_file": _item(None, "paths", "显式凭证文件", mode="startup", sensitive=True),
     "auth_dir": _item(None, "path", "凭证目录", mode="startup", env="CODEBUDDY_AUTH_DIR", sensitive=True),
     "import_dir": _item(None, "path", "导入目录", mode="startup", env="CODEBUDDY_IMPORT_DIR", sensitive=True),
-    "log_path": _item(None, "path", "兼容文本日志", mode="startup", env="CODEBUDDY2API_LOG", sensitive=True),
+    "log_path": _item(None, "path", "旧文本日志（已停用）", mode="startup", env="CODEBUDDY2API_LOG", sensitive=True),
     "admin_allowed_origins": _item("", "string", "管理页额外信任来源", env="CODEBUDDY2API_ADMIN_ORIGINS",
                                    allow_empty=True, max_length=2000, validator=normalize_allowed_origins),
     "desensitize": _item(False, "boolean", "提示词脱敏"),
@@ -76,7 +76,7 @@ SCHEMA = {
     "max_images": _item(16, "integer", "单请求图片上限", env="CODEBUDDY2API_MAX_IMAGES", minimum=0, maximum=10000),
     "image_policy": _item("truncate", "string", "超额图片策略", env="CODEBUDDY2API_IMAGE_POLICY", choices=["truncate", "error"]),
     "max_request_bytes": _item(32 * 1024 * 1024, "integer", "请求字节上限", env="CODEBUDDY2API_MAX_REQUEST_BYTES", minimum=1, maximum=1024**3),
-    "log_body_limit": _item(65536, "integer", "文本正文预览字节", env="CODEBUDDY2API_LOG_BODY_LIMIT", minimum=0, maximum=1024**2),
+    "log_body_limit": _item(65536, "integer", "旧文本预览（已停用）", env="CODEBUDDY2API_LOG_BODY_LIMIT", minimum=0, maximum=1024**2),
     "failover_max": _item(0, "integer", "换凭证重放次数", env="CODEBUDDY2API_FAILOVER_MAX",
                           minimum=0, maximum=10),
     "retry_write_timeout": _item(False, "boolean", "写超时参与重放",
@@ -161,7 +161,7 @@ def resolve_settings(config):
     result = []
     for key, spec in SCHEMA.items():
         source = sources.get(key, "default")
-        locked = spec["sensitive"] or source in ("cli", "environment", "env")
+        locked = spec["sensitive"] or source in ("cli", "environment", "env", "dotenv")
         item = {"key": key, "value": None if spec["sensitive"] else (config[key] if config.get(key) is not None else spec["default"]),
                 "stored": None if spec["sensitive"] else saved.get(key), "source": source,
                 "mode": spec["mode"], "type": spec["type"], "label": spec["label"], "locked": locked}

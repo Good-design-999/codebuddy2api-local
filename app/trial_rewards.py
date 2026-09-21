@@ -150,8 +150,9 @@ class TrialSaveError(OSError):
 class TrialLedger:
     """Persist a bounded JSON ledger under one cross-process read-modify-write lock."""
 
-    def __init__(self, path):
-        path = Path(path)
+    def __init__(self, path=None, *, store=None):
+        self._store = store
+        path = Path(store.path if store is not None else path)
         if not path.name or path.name in (".", ".."):
             raise ValueError("Trial ledger requires a file path")
         # Resolve the parent without following a symlink at the final filename.
@@ -160,9 +161,13 @@ class TrialLedger:
         self._lock_name = "trial-" + hashlib.sha256(self.path.name.encode()).hexdigest() + ".info"
 
     def _lock(self):
+        if self._store is not None:
+            return self._store.transaction()
         return credential_file_lock(self.path.parent, self._lock_name)
 
     def _load(self):
+        if self._store is not None:
+            return (self._store.get("trial") or {"accounts": {}})["accounts"]
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         try:
             fd = os.open(self.path, flags)
@@ -208,6 +213,9 @@ class TrialLedger:
                              separators=(",", ":"), allow_nan=False).encode()
         if len(content) > _MAX_BYTES:
             raise ValueError("Trial ledger exceeds size limit")
+        if self._store is not None:
+            self._store._put("trial", {"version": 1, "accounts": accounts})
+            return
         fd, temporary = tempfile.mkstemp(prefix=".trial-", suffix=".tmp", dir=self.path.parent)
         try:
             with os.fdopen(fd, "wb") as stream:

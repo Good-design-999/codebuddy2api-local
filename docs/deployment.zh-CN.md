@@ -63,14 +63,22 @@ docker compose up -d
 ```bash
 uv sync --locked --no-build --python 3.12
 (cd web && vp install --frozen-lockfile && vp build)
-uv run --locked --no-build --env-file .env converter.py --desensitize
+uv run converter.py
 ```
 
-按上文配置 `.env` 后启动，打开 `/dashboard` 添加账号。修改前端源码后需重新构建 WebUI。
+本地启动无需 `.env`。没有显式 key 时，首次回环启动会生成 `cb-…` 默认密钥，保存到 `auth/control.sqlite3`，监听成功后仅在交互终端显示一次；以后重启复用且不再打印。请妥善保存，管理登录与 API 请求共用。首次后台或非回环部署请显式配置 key。
 
-没有 uv 时：运行 `python3 -m venv .venv` 并激活，用 `pip install --require-hashes --only-binary=:all: -r requirements.txt` 安装依赖，以 `python3 converter.py --desensitize` 启动。**纯 Python 不会加载 `.env`**；请显式导出环境变量或传递 CLI 参数。
+没有 uv 时：运行 `python3 -m venv .venv` 并激活，用 `pip install --require-hashes --only-binary=:all: -r requirements.txt` 安装依赖，再执行 `python3 converter.py`。发行包已包含 WebUI；源码安装仍需构建界面。
 
-本地监听地址优先级为：显式 `--host/--port` > `CODEBUDDY2API_BIND/PORT` > WebUI 已保存值 > 默认值。希望由 `.env` 控制监听时去掉显式参数；修改需重启。`CODEBUDDY2API_IMAGE/AUTH_PATH` 仅用于 Compose；本地数据目录用 `CODEBUDDY_AUTH_DIR`。
+两种启动方式均可选读取当前工作目录的 `.env`，不搜索父目录。优先级：显式 CLI > 进程环境变量 > `.env` > SQLite 保存值 > 默认值。覆盖不改写已保存的默认 key；显式空 key 仍锁定管理。修改监听需重启，`CODEBUDDY2API_IMAGE/AUTH_PATH` 仅用于 Compose。
+
+### 升级与数据迁移
+
+升级前停止网关并备份整个数据目录。首次启动将旧 JSON 会话、冷却、积分/领取、目录和用量状态一次性导入 `control.sqlite3`；原文件保留作备份，不再参与读写。关键数据损坏或迁移失败会阻止启动，请修复或恢复备份，不要删除账本绕过检查。
+
+所有运行日志使用 `logs.sqlite3`；旧 `--log` / `CODEBUDDY2API_LOG` 仅提示弃用，不再输出文本文件。自动生成的 key 只进私有配置，不进任何日志。限制数据目录访问权限；Windows 应使用当前用户的私有目录。
+
+旧版本不能读取升级后的控制库。回滚须停机并迁回匹配的状态，不能只切代码后复用旧 JSON；升级后发生的领取、派遣或会话撤销不能用过期备份覆盖。
 
 ## 依赖锁定
 

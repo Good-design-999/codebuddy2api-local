@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import stat
+import sqlite3
 import tempfile
 import threading
 import time
@@ -95,8 +95,9 @@ class CredentialCooldowns:
     """Thread-safe, optionally persisted cooldown table keyed by validated account identity."""
 
     def __init__(self, path=None, *, auth_ceiling_s: float = AUTH_CEILING_S,
-                 model_ceiling_s: float = MODEL_CEILING_S):
-        self.path = str(path) if path else None
+                 model_ceiling_s: float = MODEL_CEILING_S, store=None):
+        self._store = store
+        self.path = str(store.path) if store is not None else (str(path) if path else None)
         self.auth_ceiling_s = _bounded_ceiling(auth_ceiling_s, AUTH_CEILING_S)
         self.model_ceiling_s = _bounded_ceiling(model_ceiling_s, MODEL_CEILING_S)
         self._lock = threading.RLock()
@@ -113,28 +114,8 @@ class CredentialCooldowns:
 
     def _load(self):
         """Adopt only a fully valid snapshot; anything else leaves the table empty."""
-        try:
-            # Reject a symlink or FIFO *before* opening, so a device cannot block the read.
-            # This is best effort on Windows and is backed up by the fstat check below.
-            if not stat.S_ISREG(os.lstat(self.path).st_mode):
-                return
-            fd = os.open(self.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                         | getattr(os, "O_NONBLOCK", 0))
-        except OSError:
-            return
-        try:
-            with os.fdopen(fd, "rb") as stream:
-                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                    return
-                raw = stream.read(MAX_BYTES + 1)
-        except OSError:
-            return
-        if len(raw) > MAX_BYTES:
-            return
-        try:
-            document = _strict_json(raw)
-        except (ValueError, UnicodeDecodeError, RecursionError):
-            return
+        from .state_store import load_document
+        document = load_document(self.path, self._store, "cooldowns", MAX_BYTES)
         if (not isinstance(document, dict) or set(document) != {"version", "accounts"}
                 or type(document["version"]) is not int or document["version"] != VERSION):
             return
@@ -204,6 +185,16 @@ class CredentialCooldowns:
             self.last_error = "serialize"
             self._dirty = True
             return False
+        if self._store is not None:
+            try:
+                self._store.put("cooldowns", json.loads(content))
+            except (OSError, ValueError, sqlite3.Error) as error:
+                self.last_error = type(error).__name__
+                self._dirty = True
+                return False
+            self.last_error = "capacity" if shed else None
+            self._dirty = shed
+            return not shed
         temporary = None
         try:
             directory = os.path.dirname(self.path) or "."

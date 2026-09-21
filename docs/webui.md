@@ -6,7 +6,7 @@
 
 Start the gateway using the [deployment guide](deployment.md), then open `http://127.0.0.1:8787/dashboard` and sign in with the current API key. Source installs need a frontend build; Docker builds include it. Use HTTPS unless connecting locally.
 
-Management is locked without a key. After changing it, sign in again and restart any unfinished OAuth login.
+The first unconfigured local startup generates and saves a default key, shown once in the terminal and reused afterward. An explicitly empty key locks management. After changing the effective key, sign in again and restart unfinished OAuth logins.
 
 ## Overview
 
@@ -74,15 +74,15 @@ Data defaults to `auth/`, or `/data/auth` inside Docker. Local installs can set 
 | File | Contents |
 |------|----------|
 | `*.info` | Official plaintext credentials; never migrated into SQLite |
-| `control.sqlite3` | Gateway settings, model rules, credential metadata and first-Buddy reservations |
+| `control.sqlite3` | Settings, private default key, model rules, sessions, cooldowns, credit/reward state, usage and catalogs |
 | `logs.sqlite3` | Request details and independent aggregate statistics |
 
 Auditing defaults to 30-day detail retention and a 256 MiB logical detail budget, **not a hard limit on database or directory disk usage**. Detail cleanup and eviction preserve aggregates. SQLite failure diagnostics have a separate budget, defaulting to 8192 bytes. Existing text logs are retained, not backfilled as precise statistics.
 
 Mount the whole data directory on writable local storage, not just a single database file, and do not share it between gateway instances.
 
-Stop the gateway before copying the entire directory, including databases, any WAL/SHM files, credentials and catalog/credit state files; do not back up only `.info` files. Keep this private data secure.
+Stop the gateway before copying the entire directory, including databases, WAL/SHM files, credentials and migration backups; do not back up only `.info`. Protect the control database: it contains the default key and management sessions.
 
-Back up control metadata before using new model rules or automation preferences. Reverting to older code requires the matching control-database snapshot, including its WAL/SHM state without mixing files; older readers reject the new fields. Rollback cannot undo completed upstream check-ins, claims or travel dispatches.
+Legacy JSON is imported once; SQLite is authoritative afterward. Downgrades require a stopped gateway and matching state migration, never stale JSON overwriting new claims or revoked sessions. See [upgrade and state migration](deployment.md#upgrade-and-state-migration).
 
 See [client configuration](clients.md) for API keys and URLs.

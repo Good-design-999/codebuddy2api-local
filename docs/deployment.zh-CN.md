@@ -70,6 +70,8 @@ uv run converter.py
 
 密码提示直接写入控制终端（`/dev/tty` 或 Windows `CONOUT$`），不经过 stdout/stderr，重定向标准输出不会收集密码；外部终端录制不在程序控制范围内。
 
+终端写入或数据库提交失败时，同一密钥保留为待显示，下次交互启动可重试。显示后、提交前崩溃可能再次提示；成功提交后不重复显示。
+
 没有 uv 时：运行 `python3 -m venv .venv` 并激活，用 `pip install --require-hashes --only-binary=:all: -r requirements.txt` 安装依赖，再执行 `python3 converter.py`。发行包已包含 WebUI；源码安装仍需构建界面。
 
 两种启动方式均可选读取当前工作目录的 `.env`，不搜索父目录。优先级：显式 CLI > 进程环境变量 > `.env` > SQLite 保存值 > 默认值。覆盖不改写已保存的默认 key；显式空 key 仍锁定管理。修改监听需重启，`CODEBUDDY2API_IMAGE/AUTH_PATH` 仅用于 Compose。

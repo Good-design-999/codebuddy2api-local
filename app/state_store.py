@@ -269,8 +269,10 @@ class StateStore:
             self._db.execute("INSERT INTO gateway_secrets(name,value,announced) VALUES('default_api_key',?,0)", (key,))
             return key, True
 
+    @contextmanager
     def claim_announcement(self, key):
-        """Commit before printing: never repeat a secret after a crash or concurrent startup."""
+        """Serialize disclosure and roll back the marker if terminal output or commit fails."""
         with self.transaction():
-            return self._db.execute("UPDATE gateway_secrets SET announced=1 WHERE name='default_api_key' "
-                                    "AND value=? AND announced=0", (key,)).rowcount == 1
+            claimed = self._db.execute("UPDATE gateway_secrets SET announced=1 WHERE name='default_api_key' "
+                                       "AND value=? AND announced=0", (key,)).rowcount == 1
+            yield claimed

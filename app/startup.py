@@ -90,9 +90,10 @@ def announce_default_key(config):
         return
     with terminal_stream() as terminal:
         key = config["api_key"]
-        if config["state_store"].claim_announcement(key):
-            terminal.write(f"\n默认 API key：{key}\n已保存到 control.sqlite3，仅显示这一次；管理登录与 API 请求共用。\n")
-            terminal.flush()
+        with config["state_store"].claim_announcement(key) as claimed:
+            if claimed:
+                terminal.write(f"\n默认 API key：{key}\n已保存到 control.sqlite3，仅显示这一次；管理登录与 API 请求共用。\n")
+                terminal.flush()
     config["announce_default_key"] = False
 
 

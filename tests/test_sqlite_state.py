@@ -243,8 +243,10 @@ class SQLiteStateTests(unittest.TestCase):
         self.assertTrue(pending)
         self.assertNotIn(key, json.dumps(self.control.snapshot()))
         self.assertEqual(self.open_control().state.default_key(), (key, True))
-        self.assertTrue(self.state.claim_announcement(key))
-        self.assertFalse(other.state.claim_announcement(key))
+        with self.state.claim_announcement(key) as claimed:
+            self.assertTrue(claimed)
+        with other.state.claim_announcement(key) as claimed:
+            self.assertFalse(claimed)
         self.assertEqual(other.state.default_key(), (key, False))
 
     def test_broken_saved_key_is_not_regenerated(self):
@@ -258,7 +260,7 @@ class SQLiteStateTests(unittest.TestCase):
         return {"state_store": self.state, "control_store": self.control, "api_key": key,
                 "host": "127.0.0.1", "settings_sources": {"api_key": source}}
 
-    def test_key_is_announced_once_only_after_successful_commit(self):
+    def test_successful_announcement_is_committed_and_not_repeated(self):
         config = self.config()
         terminal = self.console()
         with patch("sys.stderr", io.StringIO()) as output:
@@ -288,7 +290,7 @@ class SQLiteStateTests(unittest.TestCase):
         self.assertEqual(self.state.default_key(), (config["api_key"], True))
         self.assertEqual(terminal.getvalue(), "")
 
-    def test_announcement_commit_failure_never_writes_terminal(self):
+    def test_announcement_reservation_failure_never_writes_terminal(self):
         terminal = self.console()
         config = self.config()
         resolve_startup_key(config, SimpleNamespace(api_key=""))
@@ -296,6 +298,103 @@ class SQLiteStateTests(unittest.TestCase):
              self.assertRaises(sqlite3.OperationalError):
             announce_default_key(config)
         self.assertEqual(terminal.getvalue(), "")
+        self.assertEqual(self.state.default_key(), (config["api_key"], True))
+
+
+    def test_terminal_write_and_flush_failures_leave_default_key_pending(self):
+        for operation in ("write", "flush"):
+            with self.subTest(operation=operation):
+                self.control._db.execute("DELETE FROM gateway_secrets")
+                terminal = self.console()
+                config = self.config()
+                resolve_startup_key(config, SimpleNamespace(api_key=""))
+                key = config["api_key"]
+                with patch.object(terminal, operation, side_effect=BrokenPipeError("fixture terminal lost")), \
+                     self.assertRaises(BrokenPipeError):
+                    announce_default_key(config)
+                self.assertEqual(self.state.default_key(), (key, True))
+                self.assertTrue(config["announce_default_key"])
+                recovered = self.console()
+                announce_default_key(config)
+                self.assertEqual(recovered.getvalue().count(key), 1)
+                self.assertEqual(self.state.default_key(), (key, False))
+
+    def test_process_crash_during_disclosure_rolls_back_the_marker(self):
+        import subprocess
+        key, _ = self.state.default_key(create=True)
+        script = '''
+import os, sys
+from app.control_store import ControlStore
+control = ControlStore(sys.argv[1])
+key, _ = control.state.default_key()
+with control.state.claim_announcement(key) as claimed:
+    assert claimed
+    os._exit(17)
+'''
+        result = subprocess.run([sys.executable, "-B", "-c", script, str(self.control.path)],
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 17)
+        self.assertEqual((result.stdout, result.stderr), (b"", b""))
+        self.assertEqual(self.open_control().state.default_key(), (key, True))
+
+
+    def test_commit_failure_after_disclosure_keeps_recovery_pending(self):
+        terminal = self.console()
+        config = self.config()
+        resolve_startup_key(config, SimpleNamespace(api_key=""))
+        key = config["api_key"]
+        def deny_commit(action, arg1, arg2, database, trigger):
+            return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_TRANSACTION and arg1 == "COMMIT" else sqlite3.SQLITE_OK
+        self.control._db.set_authorizer(deny_commit)
+        try:
+            with self.assertRaises(sqlite3.DatabaseError):
+                announce_default_key(config)
+        finally:
+            self.control._db.set_authorizer(None)
+        self.assertFalse(self.control._db.in_transaction)
+        self.assertEqual(terminal.getvalue().count(key), 1)
+        self.assertEqual(self.state.default_key(), (key, True))
+        self.assertTrue(config["announce_default_key"])
+        recovered = self.console()
+        announce_default_key(config)
+        self.assertEqual(recovered.getvalue().count(key), 1)
+        self.assertEqual(self.state.default_key(), (key, False))
+
+    def test_concurrent_disclosures_print_only_after_acquiring_exclusive_claim(self):
+        import threading
+        terminal = self.console()
+        key, _ = self.state.default_key(create=True)
+        other = self.open_control()
+        configs = [{**self.config(), "state_store": state, "api_key": key, "announce_default_key": True}
+                   for state in (self.state, other.state)]
+        barrier = threading.Barrier(2, timeout=5)
+        def announce(config):
+            barrier.wait()
+            announce_default_key(config)
+        with concurrent.futures.ThreadPoolExecutor(2) as executor:
+            list(executor.map(announce, configs))
+        self.assertEqual(terminal.getvalue().count(key), 1)
+        self.assertEqual(self.state.default_key(), (key, False))
+        self.assertTrue(all(not config["announce_default_key"] for config in configs))
+
+    def test_terminal_failure_after_binding_shuts_down_with_pending_key(self):
+        import asyncio
+        import uvicorn
+        from fastapi import FastAPI
+        from unittest.mock import AsyncMock
+        from app.startup import run_server
+        terminal = self.console()
+        config = self.config()
+        resolve_startup_key(config, SimpleNamespace(api_key=""))
+        async def ready(server, sockets=None):
+            server.started = True
+        with patch.object(uvicorn.Server, "startup", ready), \
+             patch.object(uvicorn.Server, "shutdown", new=AsyncMock()) as shutdown, \
+             patch.object(uvicorn.Server, "run", lambda server: asyncio.run(server.startup())), \
+             patch.object(terminal, "flush", side_effect=BrokenPipeError("fixture")), \
+             self.assertRaises(BrokenPipeError):
+            run_server(FastAPI(), config, host="127.0.0.1", port=8787)
+        shutdown.assert_awaited_once()
         self.assertEqual(self.state.default_key(), (config["api_key"], True))
 
 
@@ -345,7 +444,8 @@ class SQLiteStateTests(unittest.TestCase):
         with patch.dict(os.environ, {"CODEBUDDY2API_ALLOW_OPEN_NOAUTH": "true"}, clear=True):
             with self.assertRaises(ValueError):
                 resolve_startup_key(self.config(), SimpleNamespace(api_key=""))
-            self.state.claim_announcement(key)
+            with self.state.claim_announcement(key):
+                pass
             config = {**self.config(), "host": "0.0.0.0"}
             resolve_startup_key(config, SimpleNamespace(api_key=""))
             self.assertEqual(config["api_key"], key)

@@ -23,7 +23,7 @@ class ControlStoreTests(unittest.TestCase):
         state = self.store.update_settings({"max_images": 3}, 0)
         self.assertEqual(state["revision"], 1)
         with sqlite3.connect(self.path) as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], ControlStore.SCHEMA_VERSION)
         other = ControlStore(self.path)
         self.addCleanup(other.close)
         self.assertEqual(other.snapshot()["settings"], {"max_images": 3})

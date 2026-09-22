@@ -63,14 +63,28 @@ Requires Python 3.12+, uv, and Node.js with the vp CLI to build the interface:
 ```bash
 uv sync --locked --no-build --python 3.12
 (cd web && vp install --frozen-lockfile && vp build)
-uv run --locked --no-build --env-file .env converter.py --desensitize
+uv run converter.py
 ```
 
-Configure `.env` as above before starting, then open `/dashboard` to add accounts. Rebuild the WebUI after changing frontend source.
+Local startup does not require `.env`. Without an explicit key, the first loopback startup generates a `cb-…` default key in `auth/control.sqlite3` and displays it once in the interactive terminal after listening succeeds. Restarts reuse it without printing it again. Keep it safe: management and API requests share this key. Configure a key explicitly for first-time headless or non-loopback deployment.
 
-Without uv, run `python3 -m venv .venv`, activate it, install dependencies with `pip install --require-hashes --only-binary=:all: -r requirements.txt`, and start with `python3 converter.py --desensitize`. **Plain Python does not load `.env`**; export environment variables or pass CLI flags explicitly.
+One-time disclosure goes directly to the controlling terminal (`/dev/tty` or Windows `CONOUT$`), not stdout/stderr; redirecting standard output does not capture the key. Terminal recording remains outside the gateway's control.
 
-Native binding follows explicit `--host/--port` > `CODEBUDDY2API_BIND/PORT` > saved WebUI values > defaults. Remove explicit flags if `.env` should control the listener; changes require restart. `CODEBUDDY2API_IMAGE/AUTH_PATH` remain Compose-only; use `CODEBUDDY_AUTH_DIR` for native data.
+A failed terminal write or database commit leaves the same key pending for the next interactive start. A crash between display and commit can therefore repeat the notice; a successfully committed display is not repeated.
+
+Without uv, run `python3 -m venv .venv`, activate it, install dependencies with `pip install --require-hashes --only-binary=:all: -r requirements.txt`, then run `python3 converter.py`. Distribution archives include the WebUI; source installs still need the frontend build.
+
+Both commands optionally read `.env` in the current working directory, never parent directories. Precedence: explicit CLI > process environment > `.env` > saved SQLite values > defaults. Overrides do not replace the saved default key; an explicitly empty key still locks management. Listener changes require restart; `CODEBUDDY2API_IMAGE/AUTH_PATH` are Compose-only.
+
+### Upgrade and state migration
+
+Stop the gateway and back up the entire data directory first. Startup imports legacy JSON sessions, cooldowns, credit/trial history, catalogs and usage into `control.sqlite3` once. Old files remain as backups and are no longer read or updated. Invalid critical state or a failed migration stops startup; repair it or restore a backup rather than deleting ledgers to bypass validation.
+
+SQLite state read/validation failures stop startup without deleting sessions or replacing state with empty defaults. Repair the control database before retrying; only rebuildable cache write failures may retain the current in-memory data with a warning.
+
+All runtime logs use `logs.sqlite3`; legacy `--log` / `CODEBUDDY2API_LOG` settings warn and no longer write text files. Generated keys enter private configuration, never logs. Restrict access to the data directory; use a private user directory on Windows.
+
+Older versions cannot read the upgraded control database. Downgrades require a stopped gateway and matching state migration, not merely old code reading stale JSON. Never overwrite new claims, dispatches or session revocations with an outdated backup.
 
 ## Dependency locks
 

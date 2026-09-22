@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sqlite3
 import stat
 import tempfile
 import threading
@@ -24,11 +25,7 @@ SESSION_TTL = 12 * 3600
 
 
 class SessionStoreError(RuntimeError):
-    """A superseded session snapshot could not be durably revoked.
-
-    Startup must abort on this: the surviving snapshot could otherwise be adopted by a
-    later start under the superseded key, resurrecting sessions that were meant to die.
-    """
+    """Authoritative session state could not be read or durably revoked."""
 
 
 # Optional persisted session table so a restart does not force another login.
@@ -132,14 +129,15 @@ class AdminAuth:
         self.failures = OrderedDict()
         self._configured_key = None
         self._identity = None
-        self._path = _session_path(config.get("session_path"))
+        self._store = config.get("state_store")
+        self._path = self._store.path if self._store is not None else _session_path(config.get("session_path"))
         self._storage_error = None  # Set when the snapshot could not be written or cleared.
 
     @staticmethod
     def _fingerprint(key):
         """Keyed fingerprint naming the key epoch a snapshot belongs to.
 
-        It identifies the epoch; revocation itself is performed by clearing the file.
+        It identifies the epoch; revocation clears its persisted snapshot.
         """
         return hmac.new(key.encode(), _SESSION_KEY_LABEL, hashlib.sha256).hexdigest()
 
@@ -179,6 +177,14 @@ class AdminAuth:
 
     def _revoke(self):
         """Revoke the persisted snapshot; returns False when it could not be cleared."""
+        if self._store is not None:
+            try:
+                self._store.delete("sessions")
+            except (OSError, ValueError, sqlite3.Error) as error:
+                self._storage_failed(error)
+                return False
+            self._storage_ok()
+            return True
         if self._path is None:
             return True
         try:
@@ -209,6 +215,14 @@ class AdminAuth:
         Returns False when a snapshot exists that cannot be trusted or validated,
         so the caller revokes it instead of leaving it available to a later start.
         """
+        if self._store is not None:
+            try:
+                document = self._store.get("sessions")
+                self._storage_ok()
+                return True if document is None else self._adopt(document, key)
+            except (OSError, ValueError, sqlite3.Error) as error:
+                self._storage_failed(error)
+                raise SessionStoreError("无法读取 SQLite 会话状态；保留原记录，请修复控制库后重启") from None
         if self._path is None:
             return True
         try:
@@ -237,6 +251,9 @@ class AdminAuth:
         except (ValueError, UnicodeDecodeError, RecursionError):
             # RecursionError: size-bounded but deeply nested JSON still exhausts the parser.
             return False
+        return self._adopt(document, key)
+
+    def _adopt(self, document, key):
         if (not isinstance(document, dict) or set(document) != {"version", "fingerprint", "sessions"}
                 or type(document["version"]) is not int or document["version"] != SESSION_FILE_VERSION):
             return False
@@ -280,6 +297,14 @@ class AdminAuth:
         document = {"version": SESSION_FILE_VERSION, "fingerprint": self._fingerprint(self._configured_key),
                     "sessions": {sid: {"csrf_token": item["csrf_token"], "expires": item["expires"]}
                                  for sid, item in self.sessions.items()}}
+        if self._store is not None:
+            try:
+                self._store.put("sessions", document)
+                self._storage_ok()
+                return True
+            except (OSError, ValueError, sqlite3.Error) as error:
+                self._storage_failed(error)
+                return self._revoke()
         try:
             content = json.dumps(document, ensure_ascii=False, separators=(",", ":"),
                                  allow_nan=False).encode("utf-8")
@@ -322,7 +347,12 @@ class AdminAuth:
             if restoring:
                 # Adopt only a snapshot that matches the current epoch; anything else is
                 # revoked, so switching back to an old key cannot resurrect its sessions.
-                durable = self._restore(key) or self._revoke()
+                try:
+                    durable = self._restore(key) or self._revoke()
+                except SessionStoreError:
+                    self._configured_key = previous
+                    self.sessions.clear()
+                    raise
             else:
                 # A rotated or cleared key revokes every session, on disk as well.
                 durable = self._persist()
@@ -452,7 +482,7 @@ class AdminMiddleware:
             # The key epoch changed but its superseded snapshot survives. Deny rather than
             # continue: startup refuses this case, so it is only reachable mid-process.
             return await error_response(
-                503, "会话快照无法持久撤销，管理接口已锁定；请检查管理目录权限后重启")(scope, receive, no_cache)
+                503, "会话快照无法安全读取或持久化，管理接口已锁定；请检查控制库后重启")(scope, receive, no_cache)
         if not enabled:
             return await error_response(503, "未配置 API key，管理接口已锁定")(scope, receive, no_cache)
         path, method = scope["path"], scope["method"]

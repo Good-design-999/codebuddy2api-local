@@ -47,7 +47,7 @@ _IMAGE_SUBTYPE_CHARS = frozenset(
 # hex strings/UUIDs: those often carry useful request and trace identifiers.
 _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]*){0,2}")
 _API_TOKEN = re.compile(
-    r"(?<![\w-])(?:sk-[A-Za-z0-9_-]*|(?:sk|rk)_(?:live|test)_[A-Za-z0-9_]*|"
+    r"(?<![\w-])(?:cb-[0-9a-f]*|sk-[A-Za-z0-9_-]*|(?:sk|rk)_(?:live|test)_[A-Za-z0-9_]*|"
     r"AIza[A-Za-z0-9_-]*|(?:AKIA|ASIA)[A-Z0-9]*|"
     r"gh[pousr]_[A-Za-z0-9_]*|github_pat_[A-Za-z0-9_]*|"
     r"xox[baprs]-[A-Za-z0-9-]*)"

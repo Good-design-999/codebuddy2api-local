@@ -48,17 +48,19 @@ def main():
         root = Path(directory)
         os.environ["CODEBUDDY_AUTH_DIR"] = directory
         gateway.CONFIG.update(api_key="synthetic-e2e-key", log_path=None,
-                              trial_ledger=gateway.trial_rewards.TrialLedger(root / "trial-ledger.json"),
                               control_store=ControlStore(root / "control.sqlite3"),
                               audit_store=AuditStore(root / "logs.sqlite3"))
+        state = gateway.CONFIG["control_store"].state
+        state.migrate(root)
+        gateway.CONFIG.update(state_store=state, trial_ledger=gateway.trial_rewards.TrialLedger(store=state))
         apply_persisted_settings(gateway.CONFIG, explicit=("api_key",), environ={})
         credential = {"account": {"uid": "fixture-account", "nickname": "集成测试凭证"},
                       "auth": {"domain": "www.workbuddy.cn", "accessToken": "synthetic-browser-access",
                                "refreshToken": "synthetic-browser-refresh", "expiresAt": (time.time() + 86400) * 1000}}
         path = gateway.atomic_write_credential(root, "fixture.info", json.dumps(credential).encode())
-        pool = gateway.CredentialPool([path])
+        pool = gateway.CredentialPool([path], state_store=state)
         gateway.CONFIG["cred_pool"], gateway.CONFIG["cred"] = pool, pool.first()
-        ledger = gateway.credits_mod.CreditLedger(root / "credits-ledger.json")
+        ledger = gateway.credits_mod.CreditLedger(store=state)
         pool.set_ledger(ledger)
         ledger.update_credits(str(path), {"credits": 125, "intl": False, "segments": []})
         identity = pool.entries()[0]["account_key"]

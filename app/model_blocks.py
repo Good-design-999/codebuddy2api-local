@@ -16,8 +16,9 @@ RETAIN_AFTER_S = 24 * 3600      # Retain expired hits for continued backoff
 class ModelBlocks:
     """Maintain thread-safe per-backend model backoff with optional persistence."""
 
-    def __init__(self, path=None, ttl_s: float = DEFAULT_TTL_S, max_ttl_s: float = MAX_TTL_S):
-        self.path = str(path) if path else None
+    def __init__(self, path=None, ttl_s: float = DEFAULT_TTL_S, max_ttl_s: float = MAX_TTL_S, *, store=None):
+        self._store = store
+        self.path = str(store.path) if store is not None else (str(path) if path else None)
         self.ttl_s = max(60.0, float(ttl_s or 0))
         self.max_ttl_s = max(self.ttl_s, float(max_ttl_s or 0))
         self._lock = threading.Lock()
@@ -28,11 +29,14 @@ class ModelBlocks:
     # Persistence
 
     def _load(self):
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            return
+        if self._store is not None:
+            data = self._store.get("model_blocks")
+        else:
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                return
         if not isinstance(data, dict):
             return
         out: dict[str, dict] = {}
@@ -52,6 +56,9 @@ class ModelBlocks:
             self._data = out
 
     def _save_locked(self):
+        if self._store is not None:
+            self._store.put_cache("model_blocks", {"version": 1, "blocks": self._data})
+            return
         if not self.path:
             return
         try:

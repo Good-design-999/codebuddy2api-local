@@ -320,6 +320,69 @@ class SQLiteStateTests(unittest.TestCase):
             resolve_startup_key(config, SimpleNamespace(api_key=""))
         self.assertEqual(self.state.default_key(), (None, False))
 
+    def test_explicit_noauth_opt_in_skips_first_key_generation_without_a_terminal(self):
+        for value in ("1", "true", "yes", "TRUE"):
+            for host in ("127.0.0.1", "0.0.0.0"):
+                config = {**self.config(), "host": host}
+                with self.subTest(value=value, host=host), \
+                     patch.dict(os.environ, {"CODEBUDDY2API_ALLOW_OPEN_NOAUTH": value}, clear=True):
+                    resolve_startup_key(config, SimpleNamespace(api_key=""))
+                    self.assertFalse(config["api_key"])
+                    self.assertFalse(config["announce_default_key"])
+                    self.assertEqual(self.state.default_key(), (None, False))
+        self.console_open.assert_not_called()
+
+    def test_disabled_noauth_opt_in_keeps_first_start_protection(self):
+        for value in ("", "0", "false", "no", "invalid"):
+            with self.subTest(value=value), \
+                 patch.dict(os.environ, {"CODEBUDDY2API_ALLOW_OPEN_NOAUTH": value}, clear=True), \
+                 self.assertRaises(ValueError):
+                resolve_startup_key({**self.config(), "host": "0.0.0.0"}, SimpleNamespace(api_key=""))
+        self.assertEqual(self.state.default_key(), (None, False))
+
+    def test_noauth_opt_in_never_downgrades_an_existing_default_or_override(self):
+        key, _ = self.state.default_key(create=True)
+        with patch.dict(os.environ, {"CODEBUDDY2API_ALLOW_OPEN_NOAUTH": "true"}, clear=True):
+            with self.assertRaises(ValueError):
+                resolve_startup_key(self.config(), SimpleNamespace(api_key=""))
+            self.state.claim_announcement(key)
+            config = {**self.config(), "host": "0.0.0.0"}
+            resolve_startup_key(config, SimpleNamespace(api_key=""))
+            self.assertEqual(config["api_key"], key)
+            for source in ("cli", "environment", "dotenv"):
+                config = self.config(source, "configured-fixture")
+                resolve_startup_key(config, SimpleNamespace(api_key="configured-fixture"))
+                self.assertEqual(config["api_key"], "configured-fixture")
+
+    def test_docker_default_without_key_or_terminal_reaches_server(self):
+        import converter
+        from fastapi import FastAPI
+        dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text()
+        command = json.loads(next(line[4:] for line in dockerfile.splitlines() if line.startswith("CMD ")))
+        self.assertIn("ENV CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true", dockerfile)
+        with contextlib.chdir(self.root), contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {"HOME": str(self.root), "CODEBUDDY_AUTH_DIR": str(self.root),
+                                                        "CODEBUDDY2API_ALLOW_OPEN_NOAUTH": "true"}, clear=True))
+            stack.enter_context(patch.dict(converter.CONFIG))
+            stack.enter_context(patch.object(converter, "app", FastAPI()))
+            stack.enter_context(patch.object(sys, "argv", command[1:]))
+            stack.enter_context(patch.object(converter, "seed_credentials"))
+            stack.enter_context(patch.object(converter, "CredentialPool"))
+            stack.enter_context(patch.object(converter, "_publish_model_cache"))
+            stack.enter_context(patch.object(converter.threading, "Thread"))
+            stack.enter_context(patch("sys.stderr", io.StringIO()))
+            captured = {}
+            def serve(app, config, **kwargs):
+                captured.update(kwargs, key=config["api_key"], announcement=config["announce_default_key"])
+            stack.enter_context(patch.object(converter, "run_server", side_effect=serve))
+            converter.main()
+        self.assertEqual((captured["host"], captured["port"]), ("0.0.0.0", 8787))
+        self.assertFalse(captured["key"])
+        self.assertFalse(captured["announcement"])
+        self.assertEqual(self.state.default_key(), (None, False))
+        self.console_open.assert_not_called()
+
+
     def test_dotenv_is_optional_and_process_environment_wins(self):
         path = self.root / ".env"
         with patch.dict(os.environ, {}, clear=True):

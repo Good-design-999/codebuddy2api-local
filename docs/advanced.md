@@ -191,11 +191,11 @@ Both international profiles merge image-bearing consecutive `user` runs only aft
 - Valid upstream `Retry-After` values (0–86400 seconds or equivalent HTTP dates) are returned as seconds before streaming starts; 429 only cools the selected account/model. Invalid or expired values fall back to the body's reset time or 600 seconds. Pool-generated 429 responses include the remaining wait.
 - Chat and Responses preserve an explicit client `prompt_cache_key` without generating one; cache hits and savings depend on the upstream.
 - Unsupported capabilities are rejected rather than silently degraded: chat `n` other than 1 and the Responses state fields `previous_response_id`/`conversation` (this gateway keeps no server-side response state) return 400; length-truncated or content-filtered Responses are reported as `incomplete`, never disguised as `completed`.
-- Text logs and SQLite auditing have separate budgets. Logs contain bounded, redacted previews, not complete original requests. Treat logs, credential exports and backups as private data.
+- SQLite auditing retains only bounded, redacted diagnostics, not complete original requests. Treat logs, credential exports and backups as private data.
 
 ## Deployment exposure and credential intake
 
-- The compose port mapping binds loopback by default (`CODEBUDDY2API_BIND` defaults to 127.0.0.1); after resolving CLI, environment and saved settings, a native non-loopback bind with an empty effective API key refuses to start unless `CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true` is set explicitly.
+- Compose maps loopback by default. Without a configured or saved key, `CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true` explicitly permits headless/non-loopback inference without generating a key; management stays locked. The shipped image sets this compatibility opt-in, so configure `CODEBUDDY2API_KEY` before exposing it. The opt-in never disables an existing key.
 - When a key is configured, generation and token-count POSTs verify request headers before buffering bodies or reserving inference capacity; invalid keys return 401 even while generation slots are full. Other routes retain their existing authentication and routing behavior.
 - Credential imports/uploads persist the normalized form (token aliases folded into the canonical fields); strict JSON parsing rejects NaN/Infinity, and `expiresAt`/`lastRefreshTime` must be plausible finite millisecond timestamps.
 

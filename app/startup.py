@@ -53,6 +53,11 @@ def terminal_stream():
         raise
 
 
+def allows_open_noauth():
+    """Honor the existing explicit unsafe opt-in without overriding a configured key."""
+    return os.environ.get("CODEBUDDY2API_ALLOW_OPEN_NOAUTH", "").lower() in ("1", "true", "yes")
+
+
 def resolve_startup_key(config, args, dotenv_keys=()):
     sources = config["settings_sources"]
     for name, spec in SCHEMA.items():
@@ -63,6 +68,8 @@ def resolve_startup_key(config, args, dotenv_keys=()):
         return
     store = config["state_store"]
     key, pending = store.default_key()
+    if key is None and allows_open_noauth():
+        return
     if key is None and config["host"] not in ("127.0.0.1", "::1", "localhost"):
         raise ValueError("非回环监听请显式设置 API key；默认密钥仅在本地首次启动时生成")
     if key is None or pending:

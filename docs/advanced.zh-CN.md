@@ -191,11 +191,11 @@ WebUI 可以直接上传文件；以下限制针对 `POST /admin/credentials` �
 - 上游有效 `Retry-After`（0–86400 秒或对应 HTTP 日期）规范化为秒并在开流前返回；429 仅冷却对应账号/模型。无效或过期值回落正文重置时间或默认 600 秒；本地全凭据冷却的 429 返回剩余等待秒数。
 - Chat 与 Responses 保留客户端显式 `prompt_cache_key`，不自动生成；缓存命中和节费取决于上游。
 - 不支持的能力显式拒绝而非静默降级：Chat 的 `n≠1`、Responses 的 `previous_response_id`/`conversation`（本网关不保存服务端响应状态）返回 400；长度截断或审核过滤的 Responses 标记为 `incomplete`，不伪装为 `completed`。
-- 兼容文本日志和 SQLite 审计使用独立预算；日志仅记录有界、脱敏预览，不是完整原始请求。日志、凭证导出和备份仍须按私有数据保管。
+- SQLite 审计只保留有界、脱敏诊断，不是完整原始请求。日志、凭证导出和备份仍须按私有数据保管。
 
 ## 部署暴露与凭据导入
 
-- Compose 端口映射默认只绑回环（`CODEBUDDY2API_BIND` 默认 127.0.0.1）；原生运行在合并 CLI、环境和持久化设置后，若实际地址非回环且生效 key 为空则拒绝启动，须显式设 `CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true` 放行。
+- Compose 默认映射回环地址。没有配置或已保存的 key 时，`CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true` 显式允许后台／非回环匿名推理，不生成密钥，管理仍锁定。镜像保留此兼容开关，对外暴露前请配置 `CODEBUDDY2API_KEY`；该开关不会停用已有 key。
 - 配置 key 时，生成及 token 估算 POST 在缓冲请求体、预留推理名额之前校验请求头；即使名额已满，无效 key 仍返回 401。其他路由保留原有鉴权和路由行为。
 - 凭据导入/上传在落盘前把 token 别名归一化为官方字段名；严格 JSON 解析拒绝 NaN/Infinity，`expiresAt`/`lastRefreshTime` 必须是合理的有限毫秒时间戳。
 

@@ -72,7 +72,7 @@ from app.admin_auth import SessionStoreError
 from app.content_filter import ContentFilterDetector, is_filter_error
 from app.request_limits import ImageLimitError, apply_image_policy
 from app.safe_logging import format_log_body, sanitize_log_text
-from app.startup import load_startup_env, run_server
+from app.startup import allows_open_noauth, load_startup_env, run_server
 from app.site_routing import (DOMESTIC, INTERNATIONAL, PROFILE_ENDPOINTS, site_for_auth, site_for_headers,
                               profile_for_auth, profile_for_headers, profile_region, profile_product,
                               profile_site, chat_url_for_headers, refresh_url_for_auth)
@@ -3867,7 +3867,7 @@ def main():
     runtime_management.initialize(sys.modules[__name__], args, parser=ap, dotenv_keys=dotenv_keys)
     # Validate effective binding and authentication before credential scans or background work.
     if (args.host not in ("127.0.0.1", "::1", "localhost") and not CONFIG.get("api_key")
-            and os.environ.get("CODEBUDDY2API_ALLOW_OPEN_NOAUTH", "").lower() not in ("1", "true", "yes")):
+            and not allows_open_noauth()):
         runtime_management.close(CONFIG)
         ap.error("非回环绑定且未设置 API key 会匿名开放推理额度；"
                  "请设置 CODEBUDDY2API_KEY，或确知风险后以 CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true 显式放行")

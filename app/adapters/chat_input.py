@@ -108,6 +108,8 @@ def _convert_message(message, index, pending):
                 raise _invalid(location, "tool_result requires a user message")
             if message.keys() - {"role", "content"}:
                 raise _invalid(param, "Message-level attributes cannot be assigned safely when splitting tool_result content")
+            if parts:
+                raise _invalid(location, "Tool results must precede ordinary user content")
             result = _tool_result(block, location)
             identifier = result["tool_call_id"]
             if pending.get(identifier) != 1 or identifier in result_ids:

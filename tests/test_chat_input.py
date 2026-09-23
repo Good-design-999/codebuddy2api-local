@@ -73,9 +73,9 @@ class ChatInputTests(unittest.TestCase):
         messages = [{"role": "assistant", "name": "assistant_name", "content": [
             {"type": "text", "text": "before"}, deepcopy(IMAGE), call(), call("call_2"),
             {"type": "text", "text": "after"}]},
-            {"role": "user", "content": [{"type": "text", "text": "continue"},
+            {"role": "user", "content": [
                 result(content=[{"type": "text", "text": "failed"}, deepcopy(IMAGE), deepcopy(ANTHROPIC_IMAGE)], is_error=True),
-                result("call_2", content=""), deepcopy(ANTHROPIC_IMAGE)]}]
+                result("call_2", content=""), {"type": "text", "text": "continue"}, deepcopy(ANTHROPIC_IMAGE)]}]
         before = deepcopy(messages)
         prepared = self.prepare(messages)
         self.assertEqual([m["role"] for m in prepared], ["assistant", "tool", "tool", "user"])
@@ -159,6 +159,16 @@ class ChatInputTests(unittest.TestCase):
         messages[-1]["name"] = "private-synthetic"
         self.assert_invalid(messages)
 
+    def test_user_content_before_or_between_tool_results_is_rejected(self):
+        for ordinary in ({"type": "text", "text": "keep this order"}, IMAGE, ANTHROPIC_IMAGE):
+            for position in (0, 1):
+                with self.subTest(kind=ordinary["type"], position=position):
+                    messages = [{"role": "assistant", "content": [call(), call("call_2")]},
+                                {"role": "user", "content": [result(), result("call_2")]}]
+                    messages[-1]["content"].insert(position, deepcopy(ordinary))
+                    self.assert_invalid(messages)
+
+
     def test_separate_result_messages_and_empty_blocks_keep_call_boundaries(self):
         messages = [{"role": "assistant", "content": [{"type": "text", "text": ""}, call(), call("call_2")]},
                     {"role": "user", "content": [result()]},
@@ -241,6 +251,21 @@ class ChatInputEndpointTests(unittest.TestCase):
             self.assertEqual(response.json()["error"]["type"], "invalid_request_error")
             self.fx.credentials.assert_not_called()
             self.assertEqual(self.fx.requests, [])
+
+    def test_reordered_user_content_is_rejected_without_an_upstream_attempt(self):
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                self.fx.credentials.reset_mock()
+                self.fx.requests.clear()
+                messages = history()
+                messages[-1]["content"].insert(0, {"type": "text", "text": "before the result"})
+                response = self.fx.client.post("/v1/chat/completions", json={
+                    "model": "auto", "messages": messages, "stream": stream})
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(response.json()["error"]["code"], "invalid_chat_content")
+                self.fx.credentials.assert_not_called()
+                self.assertEqual(self.fx.requests, [])
+
 
     def test_nested_image_policy_precedes_conversion(self):
         messages = history()

@@ -66,6 +66,7 @@ from app.inference_resources import (AccountCapacity, InferenceResourcesMiddlewa
 from app.request_context import SessionIdentifierError, current_context
 from app import model_capabilities
 from app.message_normalization import merge_intl_user_images
+from app.adapters.chat_input import normalize_chat_messages
 from app.model_catalog_view import INTERNATIONAL as SHARED_INTL_PROFILES, share_models
 from app.inference_auth import require_api_key
 from app.admin_auth import SessionStoreError
@@ -2656,6 +2657,7 @@ def _prepare_chat_body(body: dict, *, region=None, session_payload=None) -> dict
     if not isinstance(messages, list) or not messages or any(not isinstance(message, dict) for message in messages):
         raise HTTPException(status_code=400, detail={"error": {
             "message": "messages must be a non-empty array of objects", "type": "invalid_request_error"}})
+    messages = normalize_chat_messages(messages)
     # Upstreams reject developer roles; copy them as system messages without changing content.
     messages = [
         dict(message, role="system") if message.get("role") == "developer" else message

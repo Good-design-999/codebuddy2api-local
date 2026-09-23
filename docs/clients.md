@@ -67,6 +67,8 @@ The generation endpoints are `POST /v1/chat/completions`, `POST /v1/responses` a
 ## Protocol behavior worth knowing
 
 - `developer` messages are normalized to `system` without mutating the caller's original payload.
+- Chat accepts mixed Anthropic `tool_use` / `tool_result` history, preserving call IDs, arguments, result images and error markers; ordinary `thinking` becomes `reasoning_content`, not visible text. Native Chat fields stay unchanged.
+- Conflicting fields, unmatched tool results, unsupported mixed blocks and `redacted_thinking` return HTTP 400 before routing. Split `tool_result` user messages must contain only `role` and `content`; Anthropic thinking signatures are not forwarded.
 - Named function choices are sent upstream as `required` with only that function available; invalid names are rejected locally.
 - Errors follow the client protocol's own shape (OpenAI `error` object vs Anthropic `{"type":"error"}`), and status codes are preserved.
 - `POST /v1/messages/count_tokens` returns a character-based heuristic estimate for budgeting, not an exact count.

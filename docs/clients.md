@@ -66,7 +66,7 @@ The generation endpoints are `POST /v1/chat/completions`, `POST /v1/responses` a
 
 ## Protocol behavior worth knowing
 
-- `developer` messages are normalized to `system` without mutating the caller's original payload.
+- `developer` messages become `system`; the first system message is placed first before matching tool results, without mutating the original payload.
 - Chat accepts mixed Anthropic `tool_use` / `tool_result` history, preserving call IDs, arguments, result images and error markers; ordinary `thinking` becomes `reasoning_content`, not visible text. Native Chat fields stay unchanged.
 - Conflicting fields, unmatched tool results, unsupported mixed blocks and `redacted_thinking` return HTTP 400 before routing. Split user messages accept only `role` and `content`, with all `tool_result` blocks before ordinary text/images; Anthropic thinking signatures are not forwarded.
 - Named function choices are sent upstream as `required` with only that function available; invalid names are rejected locally.

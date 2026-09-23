@@ -180,6 +180,34 @@ class ChatInputTests(unittest.TestCase):
         messages[1]["content"].append({"type": "text", "text": "too early"})
         self.assert_invalid(messages)
 
+    def test_late_system_is_hoisted_before_matching_tool_results(self):
+        for role in ("system", "developer"):
+            with self.subTest(role=role):
+                messages = history()
+                messages.insert(2, {"role": role, "content": "late instructions"})
+                before = deepcopy(messages)
+                prepared = gateway._prepare_chat_body({"model": "auto", "messages": messages})["messages"]
+                self.assertEqual(prepared[0], {"role": "system", "content": "late instructions"})
+                self.assertEqual([m["role"] for m in prepared], ["system", "user", "assistant", "tool"])
+                self.assertEqual(prepared[2]["tool_calls"][0]["id"], prepared[3]["tool_call_id"])
+                self.assertEqual(messages, before)
+                # Only the first system is hoisted; a remaining instruction still interrupts the tool run.
+                self.assert_invalid([{"role": "system", "content": "already first"}, *messages])
+
+    def test_content_error_paths_keep_original_indices_after_system_placement(self):
+        for role, position in ((None, None), ("system", 0), ("system", 2), ("developer", 2)):
+            with self.subTest(role=role, position=position):
+                messages = history()
+                if role:
+                    messages.insert(position, {"role": role, "content": "instructions"})
+                index = next(i for i, message in enumerate(messages) if message["role"] == "assistant")
+                messages[index]["content"][0]["id"] = ""
+                with self.assertRaises(HTTPException) as error:
+                    gateway._prepare_chat_body({"model": "auto", "messages": messages})
+                self.assertEqual(error.exception.status_code, 400)
+                self.assertEqual(error.exception.detail["error"]["param"], f"messages[{index}].content[0].id")
+
+
     def test_thinking_alongside_native_calls_and_empty_reasoning_field(self):
         native = self.prepare(history())[1]
         native["reasoning_content"] = ""
@@ -239,6 +267,22 @@ class ChatInputEndpointTests(unittest.TestCase):
                 self.assertEqual(body["messages"][2].get("reasoning_content"), "synthetic reasoning" if thinking else None)
                 self.assertEqual(body["messages"][2]["tool_calls"][0]["id"], body["messages"][3]["tool_call_id"])
                 self.assertEqual(body["tools"][0]["function"]["name"], "lookup")
+
+    def test_late_system_and_developer_tool_history_reaches_upstream(self):
+        for role, stream in product(("system", "developer"), (False, True)):
+            with self.subTest(role=role, stream=stream):
+                self.fx.requests.clear()
+                messages = history()
+                messages.insert(2, {"role": role, "content": "late instructions"})
+                response = self.fx.client.post("/v1/chat/completions", json={
+                    "model": "auto", "messages": messages, "stream": stream})
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(len(self.fx.requests), 1)
+                sent = json.loads(self.fx.requests[0].content)["messages"]
+                self.assertEqual(sent[0], {"role": "system", "content": "late instructions"})
+                self.assertEqual([m["role"] for m in sent], ["system", "user", "assistant", "tool"])
+                self.assertEqual(sent[2]["tool_calls"][0]["id"], sent[3]["tool_call_id"])
+
 
     def test_invalid_history_is_rejected_before_credential_selection(self):
         for stream in (False, True):

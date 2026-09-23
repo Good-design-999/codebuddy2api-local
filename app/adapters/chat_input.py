@@ -142,11 +142,12 @@ def _convert_message(message, index, pending):
     return [out]
 
 
-def normalize_chat_messages(messages):
-    """Convert only recognized block arrays without mutating native Chat messages or opaque JSON."""
+def normalize_chat_messages(messages, *, message_indices=None):
+    """Convert recognized blocks without mutating input; retain caller indices in errors."""
     result, pending = [], {}
     for index, message in enumerate(messages):
-        converted = _convert_message(message, index, pending)
+        original_index = index if message_indices is None else message_indices[index]
+        converted = _convert_message(message, original_index, pending)
         result.extend(converted)
         for item in converted:
             if item.get("role") == "tool":

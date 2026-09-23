@@ -66,7 +66,7 @@ Cherry Studio、ZCode、LobeChat、NextChat、Open WebUI 或自研 SDK 客户端
 
 ## 值得了解的协议行为
 
-- `developer` 消息归一化为 `system`，不改动调用方原始载荷。
+- 先将 `developer` 转为 `system` 并置顶首条系统消息，再关联工具结果；不改动调用方原始载荷。
 - Chat 兼容混入的 Anthropic `tool_use` / `tool_result` 历史，保留调用 ID、参数、结果图片与错误标记；普通 `thinking` 转为 `reasoning_content`，不混入正文，原生 Chat 字段保持不变。
 - 字段冲突、工具结果无法关联、不支持的混合内容块及 `redacted_thinking` 在选路前返回 HTTP 400。需拆分的用户消息只能包含 `role`、`content`，且 `tool_result` 必须在普通文本/图片之前；Anthropic 思考签名不转发。
 - 指定名称的函数选择会以 `required` 且仅含该函数的形式发往上游；无效名称在本地拒绝。

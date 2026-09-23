@@ -2657,20 +2657,22 @@ def _prepare_chat_body(body: dict, *, region=None, session_payload=None) -> dict
     if not isinstance(messages, list) or not messages or any(not isinstance(message, dict) for message in messages):
         raise HTTPException(status_code=400, detail={"error": {
             "message": "messages must be a non-empty array of objects", "type": "invalid_request_error"}})
-    messages = normalize_chat_messages(messages)
+    # Keep error paths tied to caller positions when the upstream system message moves.
+    message_indices = list(range(len(messages)))
     # Upstreams reject developer roles; copy them as system messages without changing content.
     messages = [
         dict(message, role="system") if message.get("role") == "developer" else message
         for message in messages
     ]
-    body["messages"] = messages
     if messages[0].get("role") != "system":
         system_index = next((index for index, message in enumerate(messages) if message.get("role") == "system"), None)
         if system_index is None:
             messages = [{"role": "system", "content": "You are a helpful assistant."}, *messages]
+            message_indices.insert(0, None)
         else:
             messages = [messages[system_index], *messages[:system_index], *messages[system_index + 1:]]
-        body["messages"] = messages
+            message_indices.insert(0, message_indices.pop(system_index))
+    body["messages"] = normalize_chat_messages(messages, message_indices=message_indices)
     _normalize_tool_choice(body)
     body["stream"] = True
     body.setdefault("stream_options", {"include_usage": True})

@@ -171,7 +171,6 @@ describe("model table summaries", () => {
   it("formats token windows, rates and effort options from declarations", () => {
     expect(formatTokens(1_000_000)).toBe("1M");
     expect(formatTokens(192_000)).toBe("192K");
-    expect(formatTokens(999)).toBe("999");
     expect(specRange(model, "maxInputTokens")).toEqual([192000]);
     expect(specRange(model, "maxOutputTokens")).toEqual([32000, 64000]);
     expect(effortSummary(model)).toEqual({

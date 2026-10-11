@@ -127,6 +127,175 @@ export function CapabilityBadges({ model, full = false }: { model: Facts; full?:
   );
 }
 
+const chipTones: Record<string, string> = {
+  supported: s.capSupported,
+  mixed: s.capMixed,
+  unsupported: s.capUnsupported,
+  unknown: s.capUnknown,
+};
+const chipNames: Record<string, string> = {
+  images: "视觉",
+  tools: "工具",
+  reasoning: "推理",
+};
+const EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"];
+export function formatTokens(value: number): string {
+  if (value >= 1_000_000) {
+    const millions = value / 1_000_000;
+    return `${Number.isInteger(millions) ? millions : Math.round(millions * 10) / 10}M`;
+  }
+  if (value >= 1_000) return `${Math.round(value / 1_000)}K`;
+  return String(value);
+}
+export function specRange(model: Facts, key: "maxInputTokens" | "maxOutputTokens"): number[] {
+  const values = new Set<number>();
+  for (const [, rows] of variants(model.metadata_by_profile))
+    for (const row of rows) {
+      const direct = row[key];
+      if (typeof direct === "number" && Number.isFinite(direct) && direct > 0) {
+        values.add(direct);
+        continue;
+      }
+      if (key !== "maxInputTokens") continue;
+      const window = record(row.contextWindow);
+      const lengths = Array.isArray(window.supportedLengths)
+        ? window.supportedLengths.filter(
+            (length): length is number => typeof length === "number" && length > 0,
+          )
+        : [];
+      const fallback =
+        typeof window.defaultLength === "number" && window.defaultLength > 0
+          ? window.defaultLength
+          : lengths.length
+            ? Math.max(...lengths)
+            : null;
+      if (fallback !== null) values.add(fallback);
+    }
+  return [...values].sort((a, b) => a - b);
+}
+export function effortSummary(model: Facts): {
+  options: string[];
+  defaults: string[];
+  closable: boolean;
+  only: boolean;
+} {
+  const options = new Set<string>();
+  const defaults = new Set<string>();
+  let closable = false;
+  let only = false;
+  for (const [, rows] of variants(model.metadata_by_profile))
+    for (const row of rows) {
+      const reasoning = record(row.reasoning);
+      if (Array.isArray(reasoning.supportedEfforts))
+        for (const value of reasoning.supportedEfforts)
+          if (typeof value === "string" && value) options.add(value);
+      if (typeof reasoning.defaultEffort === "string" && reasoning.defaultEffort)
+        defaults.add(reasoning.defaultEffort);
+      if (reasoning.canDisableThinking === true) closable = true;
+      if (row.onlyReasoning === true) only = true;
+    }
+  const rank = (value: string) => {
+    const index = EFFORT_ORDER.indexOf(value);
+    return index === -1 ? EFFORT_ORDER.length : index;
+  };
+  return {
+    options: [...options].sort((a, b) => rank(a) - rank(b)),
+    defaults: [...defaults],
+    closable,
+    only,
+  };
+}
+export function rateOf(credits: unknown): number | null {
+  return typeof credits === "number" && Number.isFinite(credits) && credits >= 0 ? credits : null;
+}
+export function formatRate(value: number): string {
+  return `${Math.round(value * 100) / 100}x`;
+}
+export function CapabilityChips({ model }: { model: Facts }) {
+  const declared = record(model.capabilities);
+  const notes: string[] = [];
+  return (
+    <div className={s.specStack}>
+      <div className={s.chipRow}>
+        {(["images", "tools", "reasoning"] as const).map((key) => {
+          const raw = declared[key];
+          const state = typeof raw === "string" && Object.hasOwn(states, raw) ? raw : "unknown";
+          if (state === "mixed") notes.push(`${names[key]}${states[state]}`);
+          return (
+            <span
+              className={`${s.capChip} ${chipTones[state]}`}
+              key={key}
+              title={`${names[key]}：${states[state]}`}
+            >
+              {chipNames[key]}
+            </span>
+          );
+        })}
+      </div>
+      {notes.map((note) => (
+        <small className={s.specNote} key={note}>
+          {note}
+        </small>
+      ))}
+      {variants(model.metadata_by_profile).some(([, rows]) =>
+        rows.some((entry) => record(entry.catalog_source).kind === "shared"),
+      ) && <small className={s.specNote}>国际共享目录</small>}
+    </div>
+  );
+}
+export function EffortChips({ model }: { model: Facts }) {
+  const { options, defaults, closable, only } = effortSummary(model);
+  const state = record(model.capabilities).reasoning;
+  if (state === "unsupported") return <span className={s.specMuted}>不支持思考</span>;
+  if (!options.length && !closable && !only) {
+    if (state === "supported")
+      return (
+        <span className={s.specMuted}>
+          固定档{defaults.length === 1 ? ` · 默认 ${defaults[0]}` : ""}
+        </span>
+      );
+    return <span className={s.specMuted}>—</span>;
+  }
+  return (
+    <div className={s.chipRow}>
+      {options.map((value) => (
+        <span
+          className={`${s.effortChip} ${defaults.includes(value) ? s.effortDefault : ""}`}
+          key={value}
+          title={defaults.includes(value) ? "默认档" : undefined}
+        >
+          {value}
+        </span>
+      ))}
+      {only && <span className={`${s.effortChip} ${s.effortNote}`}>仅思考</span>}
+      {closable && <span className={`${s.effortChip} ${s.effortNote}`}>可关闭</span>}
+    </div>
+  );
+}
+export function SpecValue({ model, kind }: { model: Facts; kind: "input" | "output" }) {
+  const values = specRange(model, kind === "input" ? "maxInputTokens" : "maxOutputTokens");
+  if (!values.length) return <span className={s.specMuted}>—</span>;
+  return (
+    <span className={s.specNum}>
+      {values.length === 1
+        ? formatTokens(values[0])
+        : `${formatTokens(values[0])}–${formatTokens(values[values.length - 1])}`}
+    </span>
+  );
+}
+export function modelSearchText(
+  model: Pick<ModelRule, "id" | "public_id" | "upstream_id"> & Facts,
+): string {
+  const parts: unknown[] = [model.id, model.public_id, model.upstream_id, modelDisplayName(model)];
+  for (const [, rows] of variants(model.metadata_by_profile))
+    for (const row of rows) {
+      parts.push(row.name, row.vendor, row.descriptionZh, row.descriptionEn, row.tags);
+    }
+  const text: string[] = [];
+  for (const part of parts.flat()) if (typeof part === "string" && part) text.push(part);
+  return text.join(" ").toLowerCase();
+}
+
 function MetaFields({ data, depth = 0 }: { data: RecordValue; depth?: number }) {
   return (
     <dl className={s.metadataFields}>

@@ -551,10 +551,22 @@ $white: var(--page);
 }
 .toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 0 22px 18px;
+}
+.filterBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.filterBar select {
+  width: auto;
+  min-height: 36px;
+  padding: 6px 10px;
 }
 .toolbar > input {
   width: min(360px, 70%);
@@ -1373,6 +1385,124 @@ $white: var(--page);
 .priceList small {
   font-size: 10px;
   color: $muted;
+}
+.modelCell {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 150px;
+}
+.modelIdLine {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.rateStack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+.rateChip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--surface) 85%, transparent),
+    color-mix(in srgb, var(--accent) 16%, transparent)
+  );
+  box-shadow: inset 0 1px 0 var(--highlight);
+}
+.rateFree {
+  color: var(--good);
+  background: var(--good-bg);
+  border-color: color-mix(in srgb, var(--good) 45%, transparent);
+}
+.rateProfile {
+  font-size: 10px;
+  color: $muted;
+  font-variant-numeric: tabular-nums;
+}
+.chipRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.specStack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.capChip,
+.effortChip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  padding: 1px 8px;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+  background: var(--soft);
+  color: var(--muted);
+}
+.capSupported {
+  color: var(--good);
+  background: var(--good-bg);
+  border-color: color-mix(in srgb, var(--good) 38%, transparent);
+}
+.capMixed {
+  color: var(--warning);
+  background: var(--warning-bg);
+  border-color: color-mix(in srgb, var(--warning) 38%, transparent);
+}
+.capUnsupported {
+  text-decoration: line-through;
+  opacity: 0.72;
+}
+.capUnknown {
+  border-style: dashed;
+}
+.effortChip {
+  color: var(--strong);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+.effortNote {
+  color: var(--muted);
+  background: transparent;
+}
+.specNote {
+  font-size: 10px;
+  color: $muted;
+}
+.specNum {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.specMuted {
+  color: $muted;
+}
+.specCell {
+  white-space: nowrap;
+  text-align: center;
+}
+.capCell {
+  min-width: 176px;
+}
+.effortDefault {
+  color: var(--strong);
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+  border-color: var(--accent);
+  font-weight: 600;
 }
 .successNotice {
   padding: 13px 18px;

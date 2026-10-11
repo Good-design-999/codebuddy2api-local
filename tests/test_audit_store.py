@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app.audit_store import AuditStore, _CLEANUP_BATCH
+from app.audit_store import SCHEMA_VERSION, AuditStore, _CLEANUP_BATCH
 
 
 class AuditStoreTests(unittest.TestCase):
@@ -94,7 +94,7 @@ class AuditStoreTests(unittest.TestCase):
         self.store.record_request(self.record(input_tokens=0))
         self.store.clear("details")
         with closing(sqlite3.connect(self.path)) as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
             for table in ("stats_hourly", "stats_daily", "stats_totals"):
                 rows = db.execute(f"SELECT dimension,payload FROM {table}").fetchall()
                 self.assertEqual({r[0] for r in rows}, {"global", "model", "profile", "credential"})
@@ -148,7 +148,7 @@ class AuditStoreTests(unittest.TestCase):
             store = AuditStore(path)
             try:
                 with closing(sqlite3.connect(str(path))) as db:
-                    self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+                    self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
                     columns = [row[1] for row in db.execute("PRAGMA table_info(ingest)").fetchall()]
                     self.assertIn("created_at", columns)
                     self.assertGreater(db.execute(
@@ -520,8 +520,9 @@ class AuditStoreTests(unittest.TestCase):
             with closing(sqlite3.connect(self.path)) as fixture:
                 first = samples[-1][0] if samples else 0
                 for index in range(first, population):
-                    fixture.execute("INSERT INTO requests VALUES(?,?,?,?,?,?,?,?,?)", (
-                        f"seed{index}", stamp, None, None, None, "success", 200, "{}", 256))
+                    fixture.execute(
+                        "INSERT INTO requests(id,started_at,model,profile,credential,outcome,status_code,payload,logical_bytes) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (f"seed{index}", stamp, None, None, None, "success", 200, "{}", 256))
                     fixture.execute("INSERT INTO attempts VALUES(?,?,?)", (f"seed{index}", 0, "{}"))
                     fixture.execute("INSERT INTO events VALUES(?,?,?,?,?,?)", (
                         f"event{index}", stamp, "runtime", "test", "{}", 128))
@@ -585,6 +586,52 @@ class AuditStoreTests(unittest.TestCase):
         self.store.close()
         self.assertFalse(self.store.record_request(record)["ok"])
         self.assertTrue(self.store.storage()["degraded"])
+
+    def test_client_ip_and_agent_are_sanitized_persisted_and_filterable(self):
+        good = self.record(id="meta-1", client_ip="2001:db8::1", user_agent="synthetic-agent/1.2")
+        self.assertTrue(self.store.record_request(good)["ok"])
+        dirty = self.record(id="meta-2", client_ip="fe80::1%eth0",
+                            user_agent="evil\nBearer sk-secret\r\nX")
+        self.assertTrue(self.store.record_request(dirty)["ok"])
+        items = {item["id"]: item for item in self.store.list_records()["items"]}
+        self.assertEqual(items["meta-1"]["client_ip"], "2001:db8::1")
+        self.assertEqual(items["meta-1"]["user_agent"], "synthetic-agent/1.2")
+        self.assertIsNone(items["meta-2"]["client_ip"])
+        self.assertIsNone(items["meta-2"]["user_agent"])
+        self.assertEqual(self.store.list_records(client_ip="2001:db8::1")["items"][0]["id"], "meta-1")
+        self.assertEqual(self.store.list_records(client_ip="198.51.100.1")["items"], [])
+
+    def test_v2_database_gains_client_ip_without_losing_rows(self):
+        legacy_path = Path(self.temp.name) / "private" / "v2.sqlite3"
+        raw = sqlite3.connect(legacy_path)
+        with raw:
+            raw.execute("CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), epoch INTEGER NOT NULL,"
+                        " detail_generation INTEGER NOT NULL, cleared_at REAL NOT NULL)")
+            raw.execute("INSERT INTO state VALUES(1,0,0,0)")
+            raw.execute("CREATE TABLE requests (id TEXT PRIMARY KEY, started_at REAL NOT NULL, model TEXT,"
+                        " profile TEXT, credential TEXT, outcome TEXT, status_code INTEGER,"
+                        " payload TEXT NOT NULL, logical_bytes INTEGER NOT NULL)")
+            raw.execute(
+                "INSERT INTO requests VALUES('legacy-1', ?, 'm', NULL, NULL, 'success', 200, ?, 128)",
+                (time.time(), json.dumps({"id": "legacy-1", "model": "m", "outcome": "success",
+                                          "status_code": 200, "attempts": []})))
+            raw.execute("PRAGMA user_version=2")
+        raw.close()
+        reopened = AuditStore(legacy_path)
+        self.addCleanup(reopened.close)
+        self.assertIn("client_ip",
+                      [c[1] for c in reopened._db.execute("PRAGMA table_info(requests)")])
+        items = reopened.list_records()["items"]
+        self.assertEqual([item["id"] for item in items], ["legacy-1"])
+        self.assertIsNone(items[0].get("client_ip"))
+        self.assertTrue(reopened.record_request(
+            {"id": "meta-3", **reopened.ticket(), "started_at": time.time(),
+             "public_model": "test-model", "client_ip": "203.0.113.9",
+             "protocol": "chat", "status_code": 200, "outcome": "success"})["ok"])
+        self.assertEqual(reopened.list_records(client_ip="203.0.113.9")["items"][0]["id"], "meta-3")
+        accounting = reopened._db.execute("SELECT request_count FROM detail_accounting").fetchone()[0]
+        raw_count = reopened._db.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
+        self.assertEqual(accounting, raw_count)
 
 
 if __name__ == "__main__":

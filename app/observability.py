@@ -1,4 +1,7 @@
 """Observe inference metadata with bounded response parsing; never inspect request bodies or headers.
+
+The only headers read are audit client metadata (user-agent and forwarded-for
+chains behind a configured trusted proxy); they are never forwarded upstream.
 Preserve the ASGI wire and exclude credential files or tokens from route metadata.
 """
 from __future__ import annotations
@@ -10,12 +13,69 @@ import json
 import time
 from typing import Any
 
-from app.audit_store import AuditStore, METRICS, number, safe_attempt, safe_label
+from app.audit_store import AuditStore, METRICS, number, safe_agent, safe_attempt, safe_label
 from app.request_context import current_context, ensure_context
 
 _PATHS = {"/v1/chat/completions": "chat", "/v1/responses": "responses", "/v1/messages": "messages"}
 _PARSE_LIMIT = 16384
+_META_HEADERS = ("user-agent", "x-forwarded-for", "x-real-ip")
+_proxy_networks: dict[str, tuple] = {}
 _current: ContextVar[_Observation | None] = ContextVar("audit_observation", default=None)
+
+
+def _trusted_networks(raw):
+    """Parse a normalized trusted_proxies setting; cached per setting value."""
+    if not isinstance(raw, str) or not raw.strip():
+        return ()
+    cached = _proxy_networks.get(raw)
+    if cached is None:
+        import ipaddress
+        try:
+            cached = tuple(ipaddress.ip_network(entry.strip(), strict=False)
+                           for entry in raw.split(",") if entry.strip())
+        except ValueError:
+            return ()
+        if len(_proxy_networks) > 8:
+            _proxy_networks.clear()
+        _proxy_networks[raw] = cached
+    return cached
+
+
+def client_meta(scope, trusted_proxies):
+    """(client_ip, user_agent) for the audit record.
+
+    Forwarded headers count only when the direct peer is a trusted proxy;
+    otherwise they are ignored so clients cannot spoof their address.
+    """
+    headers = {}
+    for key, value in scope.get("headers") or []:
+        name = key.decode("latin-1").lower() if isinstance(key, (bytes, bytearray)) else str(key).lower()
+        if name in _META_HEADERS and name not in headers:
+            headers[name] = value.decode("latin-1", "replace").strip() if isinstance(value, (bytes, bytearray)) else str(value).strip()
+    client = scope.get("client")
+    remote = client[0] if client and isinstance(client[0], str) else None
+    networks = _trusted_networks(trusted_proxies)
+    try:
+        import ipaddress
+        remote_ip = ipaddress.ip_address(remote) if remote else None
+    except ValueError:
+        remote_ip = None
+    ip = remote
+    if remote_ip is not None and any(remote_ip in network for network in networks):
+        hops = [hop.strip() for hop in (headers.get("x-forwarded-for") or "").split(",") if hop.strip()][-32:]
+        chosen = None
+        for hop in reversed(hops):
+            try:
+                hop_ip = ipaddress.ip_address(hop)
+            except ValueError:
+                break
+            chosen = str(hop_ip)
+            if not any(hop_ip in network for network in networks):
+                break
+        if chosen is None:
+            chosen = headers.get("x-real-ip") or (hops[0] if hops else None)
+        ip = chosen or remote
+    return ip, safe_agent(headers.get("user-agent"))
 
 
 def _mapping(value):
@@ -333,6 +393,9 @@ class AuditMiddleware:
                                     "detail_generation": -1, "started_at": started,
                                     "protocol": _PATHS[scope["path"]],
                                     **{key: None for key in METRICS}}, monotonic_start)
+        observation.record.update(zip(("client_ip", "user_agent"),
+                                      client_meta(scope, self.config.get("trusted_proxies")
+                                                  if isinstance(self.config, dict) else None)))
         token = _current.set(observation)
         parser = _Parser(observation)
         cancelled = False

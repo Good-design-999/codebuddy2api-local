@@ -23,7 +23,7 @@ beforeEach(() => {
   vi.mocked(useResource).mockReturnValue({
     data: {
       items: [
-        { id: "request-a", model: "model-a", outcome: "success" },
+        { id: "request-a", model: "model-a", outcome: "success", client_ip: "198.51.100.9" },
         { id: "request-b", model: "model-b", outcome: "success" },
       ],
       has_more: false,
@@ -42,6 +42,43 @@ function open(index = 0) {
 function close() {
   fireEvent.click(screen.getByRole("button", { name: "关闭抽屉" }));
 }
+
+describe("runtime event labels", () => {
+  it("renders kind, action and outcome in Chinese with raw values on hover", () => {
+    vi.mocked(useResource).mockReturnValue({
+      data: {
+        items: [
+          { id: "event-1", kind: "runtime", action: "credential.sync", started_at: 1 },
+          { id: "event-2", kind: "admin", action: "mystery.action", details: { outcome: "success" } },
+        ],
+        has_more: false,
+        next_cursor: null,
+      },
+      loading: false,
+      error: null,
+      reload: vi.fn(),
+    });
+    render(<Logs />);
+    fireEvent.click(screen.getByRole("tab", { name: "运行事件" }));
+    expect(screen.getByTitle("credential.sync").textContent).toBe("凭证同步");
+    expect(screen.getByTitle("runtime").textContent).toBe("运行事件");
+    expect(screen.getByText("mystery.action")).toBeTruthy();
+    expect(screen.getByText("成功")).toBeTruthy();
+  });
+});
+
+describe("request client metadata", () => {
+  it("shows the client IP and filters requests by it", () => {
+    render(<Logs />);
+    expect(screen.getByText("198.51.100.9")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("筛选客户端 IP"), {
+      target: { value: "198.51.100.9" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "应用筛选" }));
+    const call = vi.mocked(useResource).mock.calls.at(-1)![0] as string;
+    expect(call).toContain("client_ip=198.51.100.9");
+  });
+});
 
 describe("log detail request lifetime", () => {
   it("does not reopen a closed drawer when its response arrives", async () => {

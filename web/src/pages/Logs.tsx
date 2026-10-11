@@ -22,6 +22,7 @@ import {
   Panel,
   ResourceState,
 } from "../components";
+import { eventActionLabel, eventKindLabel } from "../values";
 import { profiles } from "./Models";
 import s from "../ui.module.scss";
 function normalize(value: unknown) {
@@ -35,7 +36,20 @@ function normalize(value: unknown) {
     degraded: data.degraded === true,
   };
 }
-const emptyFilters = { model: "", credential: "", profile: "", status: "", search: "" };
+const emptyFilters = {
+  model: "",
+  credential: "",
+  profile: "",
+  status: "",
+  client_ip: "",
+  search: "",
+};
+const outcomeLabels: Record<string, string> = {
+  success: "成功",
+  error: "失败",
+  cancelled: "取消",
+  warning: "警告",
+};
 export function Logs() {
   const [kind, setKind] = useState("request");
   const [draft, setDraft] = useState(emptyFilters);
@@ -153,6 +167,12 @@ export function Logs() {
                 value={draft.credential}
                 onChange={(e) => setDraft({ ...draft, credential: e.target.value })}
               />
+              <input
+                aria-label="筛选客户端 IP"
+                placeholder="客户端 IP"
+                value={draft.client_ip}
+                onChange={(e) => setDraft({ ...draft, client_ip: e.target.value })}
+              />
               <select
                 aria-label="筛选产品"
                 value={draft.profile}
@@ -231,8 +251,23 @@ export function Logs() {
                           <small className={s.mono}>{text(item.id)}</small>
                         </td>
                         <td>
-                          <strong>{text(kind === "request" ? item.model : item.action)}</strong>
-                          <small>{text(kind === "request" ? item.profile : item.kind)}</small>
+                          <strong title={kind === "request" ? undefined : text(item.action)}>
+                            {text(
+                              kind === "request"
+                                ? item.model
+                                : (eventActionLabel(item.action) ?? item.action),
+                            )}
+                          </strong>
+                          <small title={kind === "request" ? undefined : text(item.kind)}>
+                            {text(
+                              kind === "request"
+                                ? item.profile
+                                : (eventKindLabel(item.kind) ?? item.kind),
+                            )}
+                          </small>
+                          {kind === "request" && item.client_ip ? (
+                            <small className={s.mono}>{text(item.client_ip)}</small>
+                          ) : null}
                         </td>
                         <td>
                           <Badge
@@ -246,9 +281,8 @@ export function Logs() {
                                     : "neutral"
                             }
                           >
-                            {outcome === "warning"
-                              ? "警告"
-                              : text(outcome ?? item.level ?? item.status)}
+                            {outcomeLabels[outcome] ??
+                              text(outcome ?? item.level ?? item.status)}
                           </Badge>
                           {item.status_code !== undefined && (
                             <small>HTTP {text(item.status_code)}</small>

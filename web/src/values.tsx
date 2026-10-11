@@ -143,6 +143,8 @@ const labels: Record<string, string> = {
   schema_version: "存储版本",
   epoch: "统计代次",
   degraded: "存储降级",
+  client_ip: "客户端 IP",
+  user_agent: "客户端 UA",
   failure_count: "失败次数",
   dropped_records: "未写入记录数",
   closed: "存储已关闭",
@@ -240,6 +242,50 @@ const ownLabel = (map: Record<string, string>, key: string) =>
   Object.hasOwn(map, key) ? map[key] : undefined;
 export function profileLabel(value: string) {
   return ownLabel(profiles, value) ?? value;
+}
+const eventKinds: Record<string, string> = {
+  runtime: "运行事件",
+  admin: "管理操作",
+};
+const eventActions: Record<string, string> = {
+  credits: "积分",
+  cred: "凭证",
+  models: "模型目录",
+  usage: "用量",
+  checkin: "签到",
+  dailychat: "每日对话",
+  buddy: "首领",
+  "buddy.attention_required": "首领需要关注",
+  "buddy.consent": "首领同意",
+  "buddy.agreement": "首领协议",
+  "buddy.departure": "首领出发",
+  "buddy.departure_requested": "首领请求出发",
+  "buddy.first": "首领领取",
+  "buddy.task_accept": "首领任务接取",
+  "buddy.task_chat": "首领任务对话",
+  "buddy.task_completed": "首领任务完成",
+  "buddy.authorization_used": "首领授权已使用",
+  "credential.sync": "凭证同步",
+  "credential.travel": "凭证旅行",
+  "credential.travel-status": "凭证旅行状态",
+  "credential.refresh": "凭证刷新",
+  "credential.checkin": "凭证签到",
+  "credential.daily-chat": "凭证每日对话",
+  "credential.auto_daily_chat": "凭证自动每日对话",
+  "credential.trial": "凭证试用",
+  "credential.enabled": "凭证启停",
+  "credential.reset-cooldown": "凭证清除冷却",
+  "oauth.saved": "OAuth 凭证已保存",
+  "settings.updated": "设置已更新",
+  "model.created": "模型已创建",
+  "model.updated": "模型已更新",
+  "model.deleted": "模型已删除",
+};
+export function eventKindLabel(kind: unknown) {
+  return typeof kind === "string" ? ownLabel(eventKinds, kind) : undefined;
+}
+export function eventActionLabel(action: unknown) {
+  return typeof action === "string" ? ownLabel(eventActions, action) : undefined;
 }
 export function bytes(value: number) {
   if (value < 1024) return `${metric(value)} B`;

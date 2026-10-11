@@ -160,6 +160,33 @@ const zh: Record<string, string> = {
   "dash.storage.collectDegraded": "采集降级",
   "dash.credentials": "凭证",
   "dash.window": "统计窗口",
+  "val.success": "成功",
+  "val.error": "失败",
+  "val.cancelled": "已取消",
+  "val.e.invalid_request": "无效请求",
+  "val.e.upstream": "上游错误",
+  "val.e.upstream_timeout": "上游超时",
+  "val.e.incomplete_stream": "流未完整结束",
+  "val.e.incomplete_response": "响应不完整",
+  "val.e.application": "应用异常",
+  "val.e.content_filter": "内容过滤",
+  "val.e.model_disabled": "模型已停用",
+  "val.e.sse": "SSE 错误",
+  "val.mode.compatible": "兼容模式",
+  "val.mode.realtime": "实时模式",
+  "val.usage.mixed": "混合来源",
+  "val.usage.wire_sse": "流式解析",
+  "val.usage.upstream_hook": "上游读取",
+  "val.catalog.shared": "共享目录",
+  "val.catalog.direct": "直接声明",
+  "val.code.cooldown": "熔断冷却",
+  "val.code.failure": "失败",
+  "val.code.updated": "更新",
+  "val.stage.route": "路由",
+  "val.stage.send": "发送",
+  "val.stage.collect": "聚合",
+  "val.stage.refresh": "刷新",
+  "val.level.info": "信息",
   "trend.partialRange": "该范围缺少小时记录",
   "trend.emptyRange": "当前时间范围内暂无请求",
   "dash.trend.daily": "按日请求量趋势",
@@ -345,6 +372,33 @@ const en: Record<string, string> = {
   "dash.storage.collectDegraded": "Collection degraded",
   "dash.credentials": "Credentials",
   "dash.window": "Statistics window",
+  "val.success": "Success",
+  "val.error": "Failed",
+  "val.cancelled": "Cancelled",
+  "val.e.invalid_request": "Invalid request",
+  "val.e.upstream": "Upstream error",
+  "val.e.upstream_timeout": "Upstream timeout",
+  "val.e.incomplete_stream": "Incomplete stream",
+  "val.e.incomplete_response": "Incomplete response",
+  "val.e.application": "Application error",
+  "val.e.content_filter": "Content filter",
+  "val.e.model_disabled": "Model disabled",
+  "val.e.sse": "SSE error",
+  "val.mode.compatible": "Compatible mode",
+  "val.mode.realtime": "Realtime mode",
+  "val.usage.mixed": "Mixed sources",
+  "val.usage.wire_sse": "Stream parsing",
+  "val.usage.upstream_hook": "Upstream read",
+  "val.catalog.shared": "Shared catalog",
+  "val.catalog.direct": "Direct declaration",
+  "val.code.cooldown": "Cooldown",
+  "val.code.failure": "Failure",
+  "val.code.updated": "Updated",
+  "val.stage.route": "Route",
+  "val.stage.send": "Send",
+  "val.stage.collect": "Collect",
+  "val.stage.refresh": "Refresh",
+  "val.level.info": "Info",
   "trend.partialRange": "This range lacks hourly records",
   "trend.emptyRange": "No requests in this range",
   "dash.trend.daily": "Daily request trend",
@@ -413,11 +467,8 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
   });
   currentLang = lang;
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, lang);
-    } catch {
-      /* Session-only preference when storage is unavailable. */
-    }
+    // 只更新文档语言；localStorage 仅在用户主动切换时写入，
+    // 保证未操作的访客在站点上不留下任何存储痕迹。
     document.documentElement.lang = lang === "en" ? "en" : "zh-CN";
   }, [lang]);
   useEffect(() => {

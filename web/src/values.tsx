@@ -1,4 +1,5 @@
 import { metric, type RecordValue } from "./api";
+import { t as translate } from "./i18n";
 import s from "./ui.module.scss";
 
 const labels: Record<string, string> = {
@@ -293,6 +294,36 @@ export function bytes(value: number) {
   if (value < 1073741824) return `${(value / 1048576).toFixed(1)} MiB`;
   return `${(value / 1073741824).toFixed(2)} GiB`;
 }
+const valueKeys: Record<string, string> = {
+  success: "val.success",
+  error: "val.error",
+  cancelled: "val.cancelled",
+  invalid_request_error: "val.e.invalid_request",
+  upstream_error: "val.e.upstream",
+  upstream_timeout: "val.e.upstream_timeout",
+  incomplete_stream: "val.e.incomplete_stream",
+  incomplete_response: "val.e.incomplete_response",
+  application_error: "val.e.application",
+  content_filter: "val.e.content_filter",
+  model_disabled: "val.e.model_disabled",
+  sse_error: "val.e.sse",
+  compatible: "val.mode.compatible",
+  realtime: "val.mode.realtime",
+  mixed: "val.usage.mixed",
+  wire_sse: "val.usage.wire_sse",
+  upstream_hook: "val.usage.upstream_hook",
+  shared: "val.catalog.shared",
+  direct: "val.catalog.direct",
+  cooldown: "val.code.cooldown",
+  failure: "val.code.failure",
+  updated: "val.code.updated",
+  route: "val.stage.route",
+  send: "val.stage.send",
+  collect: "val.stage.collect",
+  refresh: "val.stage.refresh",
+  info: "val.level.info",
+};
+
 export function DataValue({
   value,
   name = "",
@@ -303,6 +334,13 @@ export function DataValue({
   depth?: number;
 }) {
   if (value === null || value === undefined) return <span className={s.valueMuted}>—</span>;
+  if (typeof value === "string" && Object.hasOwn(valueKeys, value)) {
+    return (
+      <span className={s.valueMuted} title={value}>
+        {translate(valueKeys[value] as string)}
+      </span>
+    );
+  }
   if (typeof value === "boolean") {
     const warning = ["partial", "degraded", "token_expired", "closed"].includes(name);
     return (

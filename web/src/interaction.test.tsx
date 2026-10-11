@@ -101,7 +101,7 @@ describe("structured metadata", () => {
     expect(screen.getByText("已停用")).toBeTruthy();
     expect(screen.getByText("1.0 KiB")).toBeTruthy();
     expect(screen.getByText("Example")).toBeTruthy();
-    expect(screen.getByText("未知")).toBeTruthy();
+    expect(screen.getByText("—")).toBeTruthy();
     expect(screen.getByText("0")).toBeTruthy();
     expect(container.textContent).not.toContain('"name":');
   });

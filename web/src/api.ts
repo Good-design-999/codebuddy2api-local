@@ -39,21 +39,19 @@ export function list(value: unknown, context = "列表"): RecordValue[] {
   return value.map((item) => object(item, context));
 }
 export function text(value: unknown): string {
-  if (value === undefined || value === null) return "未知";
+  if (value === undefined || value === null) return "—";
   if (typeof value === "object") return JSON.stringify(value);
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint")
     return `${value}`;
-  return "未知";
+  return "—";
 }
 export function number(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 export function metric(value: unknown): string {
   const n = number(value);
-  return n === null
-    ? "未知"
-    : new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(n);
+  return n === null ? "—" : new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(n);
 }
 export function errorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {

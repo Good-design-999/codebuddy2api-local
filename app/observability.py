@@ -7,6 +7,7 @@ Preserve the ASGI wire and exclude credential files or tokens from route metadat
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 import json
@@ -48,32 +49,46 @@ def client_meta(scope, trusted_proxies):
     otherwise they are ignored so clients cannot spoof their address.
     """
     headers = {}
+    forwarded: list[str] = []
     for key, value in scope.get("headers") or []:
         name = key.decode("latin-1").lower() if isinstance(key, (bytes, bytearray)) else str(key).lower()
-        if name in _META_HEADERS and name not in headers:
-            headers[name] = value.decode("latin-1", "replace").strip() if isinstance(value, (bytes, bytearray)) else str(value).strip()
+        clean = value.decode("latin-1", "replace").strip() if isinstance(value, (bytes, bytearray)) else str(value).strip()
+        if name == "x-forwarded-for":
+            # A trusted proxy may append its hop as a separate header field;
+            # combine the fields in order before walking the chain.
+            if clean:
+                forwarded.append(clean)
+        elif name in _META_HEADERS and name not in headers:
+            headers[name] = clean
     client = scope.get("client")
     remote = client[0] if client and isinstance(client[0], str) else None
+
+    def valid_ip(candidate: str | None) -> str | None:
+        try:
+            return str(ipaddress.ip_address(candidate)) if candidate else None
+        except ValueError:
+            return None
+
+    remote_ip = valid_ip(remote)
+    remote_obj = ipaddress.ip_address(remote_ip) if remote_ip else None
     networks = _trusted_networks(trusted_proxies)
-    try:
-        import ipaddress
-        remote_ip = ipaddress.ip_address(remote) if remote else None
-    except ValueError:
-        remote_ip = None
     ip = remote
-    if remote_ip is not None and any(remote_ip in network for network in networks):
-        hops = [hop.strip() for hop in (headers.get("x-forwarded-for") or "").split(",") if hop.strip()][-32:]
+    if remote_obj is not None and any(remote_obj in network for network in networks):
+        hops = [hop.strip() for hop in (",".join(forwarded)).split(",") if hop.strip()][-32:]
         chosen = None
+        broken = False
         for hop in reversed(hops):
-            try:
-                hop_ip = ipaddress.ip_address(hop)
-            except ValueError:
+            hop_ip = valid_ip(hop)
+            if hop_ip is None:
+                # A malformed hop breaks the chain; never fall back to the
+                # client-controlled leftmost entry in that case.
+                broken = True
                 break
-            chosen = str(hop_ip)
-            if not any(hop_ip in network for network in networks):
+            chosen = hop_ip
+            if not any(ipaddress.ip_address(hop_ip) in network for network in networks):
                 break
-        if chosen is None:
-            chosen = headers.get("x-real-ip") or (hops[0] if hops else None)
+        if chosen is None or broken:
+            chosen = valid_ip(headers.get("x-real-ip"))
         ip = chosen or remote
     return ip, safe_agent(headers.get("user-agent"))
 

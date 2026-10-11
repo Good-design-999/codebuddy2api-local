@@ -166,6 +166,9 @@ class AuditStore:
         columns = [row[1] for row in self._db.execute("PRAGMA table_info(requests)").fetchall()]
         if "client_ip" not in columns:
             self._db.execute("ALTER TABLE requests ADD COLUMN client_ip TEXT")
+        # Exact-match client filters must not scan the retained time range.
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS requests_client ON requests(client_ip, started_at)")
 
     def _init_accounting(self):
         # Additive v1 migration: scan legacy details only once, under the same

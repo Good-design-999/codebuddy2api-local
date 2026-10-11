@@ -621,6 +621,8 @@ class AuditStoreTests(unittest.TestCase):
         self.addCleanup(reopened.close)
         self.assertIn("client_ip",
                       [c[1] for c in reopened._db.execute("PRAGMA table_info(requests)")])
+        indexes = [row[1] for row in reopened._db.execute("PRAGMA index_list(requests)")]
+        self.assertIn("requests_client", indexes)
         items = reopened.list_records()["items"]
         self.assertEqual([item["id"] for item in items], ["legacy-1"])
         self.assertIsNone(items[0].get("client_ip"))

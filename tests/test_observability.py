@@ -426,6 +426,35 @@ class ClientMetaTests(unittest.TestCase):
         self.assertEqual(client_meta(scope, "127.0.0.1"), ("203.0.113.7", "synthetic/1.0"))
         self.assertEqual(client_meta(scope, ""), ("203.0.113.7", "synthetic/1.0"))
 
+    def test_repeated_forwarded_fields_are_combined_in_order(self):
+        # Client spoofs one XFF field; the trusted proxy appends the real
+        # chain as a second field. The combined chain must prefer the
+        # proxy-appended hop, not the client-supplied first field.
+        scope = self.scope(
+            client=("127.0.0.1", 8080),
+            headers=[
+                ("X-Forwarded-For", "6.6.6.6"),
+                ("X-Forwarded-For", "198.51.100.9, 10.0.0.9"),
+            ],
+        )
+        self.assertEqual(client_meta(scope, "127.0.0.1, 10.0.0.0/8")[0], "198.51.100.9")
+
+    def test_malformed_fallback_values_are_rejected(self):
+        real = self.scope(
+            client=("127.0.0.1", 8080),
+            headers=[("X-Forwarded-For", "198.51.100.9, not-an-ip"), ("X-Real-IP", "garbage")],
+        )
+        # The malformed hop stops the walk; the X-Real-IP fallback is not an
+        # address either, so the trusted proxy address itself is recorded.
+        self.assertEqual(client_meta(real, "127.0.0.1")[0], "127.0.0.1")
+        # Even with a trusted proxy ahead of the garbage, a broken chain never
+        # promotes the client-controlled leftmost entry.
+        first = self.scope(
+            client=("127.0.0.1", 8080),
+            headers=[("X-Forwarded-For", "198.51.100.9, not-an-ip")],
+        )
+        self.assertEqual(client_meta(first, "127.0.0.1, 10.0.0.0/8")[0], "127.0.0.1")
+
     def test_trusted_proxy_unwraps_rightmost_untrusted_hop(self):
         scope = self.scope(client=("127.0.0.1", 8080),
                            headers=[("X-Forwarded-For", "198.51.100.9, 10.0.0.9")])

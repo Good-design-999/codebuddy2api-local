@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.audit_store import AuditStore
-from app.observability import (AuditMiddleware, _Observation, _Parser, normalize_usage,
+from app.observability import (AuditMiddleware, _Observation, _Parser, client_meta, normalize_usage,
                                observe_attempt, observe_failure, observe_responses_projection,
                                observe_route, observe_usage)
 
@@ -23,14 +23,19 @@ class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
         self.store.close()
         self.temp.cleanup()
 
-    async def invoke(self, app, path="/v1/chat/completions", method="POST", receiver=None, sender=None):
+    async def invoke(self, app, path="/v1/chat/completions", method="POST", receiver=None, sender=None,
+                     attrs=None, trusted_proxies=None):
         sent = []
         async def receive():
             self.fail("request body must not be inspected by middleware")
         async def send(message):
             sent.append(message)
-        middleware = AuditMiddleware(app, {"audit_store": self.store})
-        await middleware({"type": "http", "method": method, "path": path}, receiver or receive, sender or send)
+        config = {"audit_store": self.store}
+        if trusted_proxies is not None:
+            config["trusted_proxies"] = trusted_proxies
+        middleware = AuditMiddleware(app, config)
+        scope = {"type": "http", "method": method, "path": path, **(attrs or {})}
+        await middleware(scope, receiver or receive, sender or send)
         return sent
 
     def only_record(self):
@@ -339,6 +344,23 @@ class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
                 await task
         self.assertEqual(self.only_record()["outcome"], "cancelled")
 
+    async def test_client_meta_recorded_and_proxy_unwrapped(self):
+        async def app(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+        attrs = {"client": ("127.0.0.1", 4000),
+                 "headers": [(b"x-forwarded-for", b"198.51.100.9"), (b"user-agent", b"ua-test/2.0")]}
+        await self.invoke(app, attrs=attrs, trusted_proxies="127.0.0.1")
+        record = self.only_record()
+        self.assertEqual(record["client_ip"], "198.51.100.9")
+        self.assertEqual(record["user_agent"], "ua-test/2.0")
+        self.store.clear("all")
+        # Without a trusted proxy the forwarded header must not be trusted.
+        await self.invoke(app, attrs=attrs)
+        record = self.only_record()
+        self.assertEqual(record["client_ip"], "127.0.0.1")
+        self.assertEqual(record["user_agent"], "ua-test/2.0")
+
     async def test_failure_hook_preserves_specific_code_on_truncated_stream(self):
         async def app(scope, receive, send):
             await send({"type": "http.response.start", "status": 200,
@@ -392,6 +414,73 @@ class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
         result = normalize_usage({"input_tokens": False, "output_tokens": -1, "total_tokens": float("nan"),
                                   "credit": 0, "cache_read_input_tokens": 0, "reasoning_tokens": "3"})
         self.assertEqual(result, {"credit": 0, "cache_read_tokens": 0})
+
+
+class ClientMetaTests(unittest.TestCase):
+    def scope(self, client=("203.0.113.7", 443), headers=()):
+        return {"type": "http", "client": client,
+                "headers": [(key.encode(), value.encode()) for key, value in headers]}
+
+    def test_untrusted_direct_peer_ignores_forwarded_headers(self):
+        scope = self.scope(headers=[("X-Forwarded-For", "9.9.9.9"), ("User-Agent", "synthetic/1.0")])
+        self.assertEqual(client_meta(scope, "127.0.0.1"), ("203.0.113.7", "synthetic/1.0"))
+        self.assertEqual(client_meta(scope, ""), ("203.0.113.7", "synthetic/1.0"))
+
+    def test_repeated_forwarded_fields_are_combined_in_order(self):
+        # Client spoofs one XFF field; the trusted proxy appends the real
+        # chain as a second field. The combined chain must prefer the
+        # proxy-appended hop, not the client-supplied first field.
+        scope = self.scope(
+            client=("127.0.0.1", 8080),
+            headers=[
+                ("X-Forwarded-For", "6.6.6.6"),
+                ("X-Forwarded-For", "198.51.100.9, 10.0.0.9"),
+            ],
+        )
+        self.assertEqual(client_meta(scope, "127.0.0.1, 10.0.0.0/8")[0], "198.51.100.9")
+
+    def test_malformed_fallback_values_are_rejected(self):
+        real = self.scope(
+            client=("127.0.0.1", 8080),
+            headers=[("X-Forwarded-For", "198.51.100.9, not-an-ip"), ("X-Real-IP", "garbage")],
+        )
+        # The malformed hop stops the walk; the X-Real-IP fallback is not an
+        # address either, so the trusted proxy address itself is recorded.
+        self.assertEqual(client_meta(real, "127.0.0.1")[0], "127.0.0.1")
+        # Even with a trusted proxy ahead of the garbage, a broken chain never
+        # promotes the client-controlled leftmost entry.
+        first = self.scope(
+            client=("127.0.0.1", 8080),
+            headers=[("X-Forwarded-For", "198.51.100.9, not-an-ip")],
+        )
+        self.assertEqual(client_meta(first, "127.0.0.1, 10.0.0.0/8")[0], "127.0.0.1")
+
+    def test_trusted_proxy_unwraps_rightmost_untrusted_hop(self):
+        scope = self.scope(client=("127.0.0.1", 8080),
+                           headers=[("X-Forwarded-For", "198.51.100.9, 10.0.0.9")])
+        self.assertEqual(client_meta(scope, "127.0.0.1,10.0.0.0/8")[0], "198.51.100.9")
+
+    def test_forged_entries_beyond_the_trusted_chain_are_ignored(self):
+        scope = self.scope(client=("127.0.0.1", 8080),
+                           headers=[("X-Forwarded-For", "6.6.6.6, 198.51.100.9, 10.0.0.9")])
+        self.assertEqual(client_meta(scope, "127.0.0.1, 10.0.0.0/8")[0], "198.51.100.9")
+
+    def test_all_trusted_chain_falls_back_to_leftmost_and_real_ip(self):
+        chain = self.scope(client=("127.0.0.1", 1),
+                           headers=[("X-Forwarded-For", "10.0.0.9, 10.0.1.9")])
+        self.assertEqual(client_meta(chain, "127.0.0.1, 10.0.0.0/8")[0], "10.0.0.9")
+        real = self.scope(client=("127.0.0.1", 1), headers=[("X-Real-IP", "198.51.100.9")])
+        self.assertEqual(client_meta(real, "127.0.0.1")[0], "198.51.100.9")
+
+    def test_user_agent_is_sanitized(self):
+        dirty = self.scope(headers=[("User-Agent", "a\nb Bearer x  y")])
+        self.assertIsNone(client_meta(dirty, "")[1])
+        long = self.scope(headers=[("User-Agent", "x" * 500)])
+        self.assertEqual(client_meta(long, "")[1], "x" * 200)
+
+    def test_missing_client_scope_still_records_agent(self):
+        scope = {"type": "http", "headers": [(b"user-agent", b"ua/9")]}
+        self.assertEqual(client_meta(scope, ""), (None, "ua/9"))
 
 
 if __name__ == "__main__":

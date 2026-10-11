@@ -27,8 +27,8 @@ function response(data: unknown, config: InternalAxiosRequestConfig) {
 }
 describe("API and session state", () => {
   it("keeps unknown distinct from explicit zero", () => {
-    expect(metric(undefined)).toBe("未知");
-    expect(metric(null)).toBe("未知");
+    expect(metric(undefined)).toBe("—");
+    expect(metric(null)).toBe("—");
     expect(metric(0)).toBe("0");
   });
   it("rejects malformed DTO instead of fabricating empty success", () => {

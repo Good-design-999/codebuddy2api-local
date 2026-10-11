@@ -22,6 +22,8 @@ services:
       CODEBUDDY2API_AUTO_ACCEPT_BUDDY: ${CODEBUDDY2API_AUTO_ACCEPT_BUDDY:-false}
       # Unset variables remain configurable through the WebUI.
       CODEBUDDY2API_ADMIN_ORIGINS:
+      # Trusted proxy IPs/CIDRs; forwarded headers count only from these peers.
+      CODEBUDDY2API_TRUSTED_PROXIES:
       CODEBUDDY2API_KEEP_TOOL_METADATA:
       CODEBUDDY2API_MAX_IMAGES: ${CODEBUDDY2API_MAX_IMAGES:-16}
       CODEBUDDY2API_IMAGE_POLICY: ${CODEBUDDY2API_IMAGE_POLICY:-truncate}

@@ -33,6 +33,23 @@ def normalize_allowed_origins(value):
     return ",".join(normalized)
 
 
+def normalize_trusted_proxies(value):
+    """Normalize a comma/space separated list of trusted proxy IPs or CIDRs."""
+    import ipaddress
+    entries = [entry for entry in re.split(r"[\s,]+", value.strip()) if entry]
+    if len(entries) > 32:
+        raise ValueError("trusted_proxies: 代理数量超出上限")
+    normalized = []
+    for entry in entries:
+        try:
+            network = str(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            raise ValueError(f"trusted_proxies: 地址无效 {entry!r}") from None
+        if network not in normalized:
+            normalized.append(network)
+    return ",".join(normalized)
+
+
 def validate_projection_max_bytes(value):
     """Allow zero or enough room for a bounded head/tail warning."""
     if value != 0 and value < 256:
@@ -105,6 +122,9 @@ SCHEMA = {
     "audit_max_bytes": _item(256 * 1024 * 1024, "integer", "审计明细预算", minimum=1024**2, maximum=1024**4),
     "audit_retention_days": _item(30, "integer", "审计明细保留天数", minimum=1, maximum=36500),
     "audit_diagnostic_bytes": _item(8192, "integer", "失败诊断最大字节", minimum=0, maximum=8192),
+    "trusted_proxies": _item("", "string", "可信代理地址（IP/CIDR，逗号分隔）",
+                             env="CODEBUDDY2API_TRUSTED_PROXIES", allow_empty=True,
+                             max_length=2000, validator=normalize_trusted_proxies),
 }
 
 

@@ -13,6 +13,7 @@ On first setup, run `cp .env.example .env` and set `CODEBUDDY2API_KEY` to your o
 | `CODEBUDDY2API_IMAGE` | Compose image; the template uses `codebuddy2api:local` |
 | `CODEBUDDY2API_BIND` / `CODEBUDDY2API_PORT` | Native listener and Compose host mapping; default `127.0.0.1:8787` |
 | `CODEBUDDY2API_AUTH_PATH` | Compose host data directory; defaults to `./auth`, mounted at `/data/auth` |
+| `CODEBUDDY2API_TRUSTED_PROXIES` | Trusted proxy IPs/CIDRs (comma separated); when the direct peer matches, the audit log records the client from `X-Forwarded-For`/`X-Real-IP` instead of the proxy address |
 | `CODEBUDDY_AUTH_DIR` | Local Python data directory; defaults to the repository's `auth/`. Compose sets it to `/data/auth` inside the container |
 | `CODEBUDDY_IMPORT_DIR` | Optional import directory; defaults to `imports/` under the data directory. Use container paths with Compose |
 The example lists all active runtime variables, including inbound/aggregate byte limits, concurrency, tool retries and failover. Compose forwards these limits; unset optional settings (tool metadata, Responses projection, origin allowlist, failover and similar) remain configurable in the WebUI. Zero disables aggregate/concurrency limits, per-item Responses trimming or extra retries, not the required positive inbound limit.
@@ -74,6 +75,8 @@ A failed terminal write or database commit leaves the same key pending for the n
 Without uv, run `python3 -m venv .venv`, activate it, install dependencies with `pip install --require-hashes --only-binary=:all: -r requirements.txt`, then run `python3 converter.py`. Distribution archives include the WebUI; source installs still need the frontend build.
 
 Both commands optionally read `.env` in the current working directory, never parent directories. Precedence: explicit CLI > process environment > `.env` > saved SQLite values > defaults. Overrides do not replace the saved default key; an explicitly empty key still locks management. Listener changes require restart; `CODEBUDDY2API_IMAGE/AUTH_PATH` are Compose-only.
+
+> The audit schema is single-writer: stop the old instance before starting a new version, and never run two gateway versions against one auth directory.
 
 ### Upgrade and state migration
 

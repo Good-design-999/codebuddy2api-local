@@ -4,6 +4,7 @@ import { lockPage } from "./modal";
 import { useExiting } from "./presence";
 export { DrawerPresence } from "./presence";
 import s from "./ui.module.scss";
+import { useT } from "./i18n";
 
 export function Icon({ name = "grid" }: { name?: string }) {
   const paths: Record<string, string> = {
@@ -63,19 +64,22 @@ export function PageTitle({
   );
 }
 export function ErrorNotice({ message, retry }: { message: string | null; retry?: () => void }) {
+  const t = useT();
   return message ? (
     <div className={s.error} role="alert">
       <Icon name="alert" />
       <span>{message}</span>
-      {retry && <button onClick={retry}>重试</button>}
+      {retry && <button onClick={retry}>{t("common.retry")}</button>}
     </div>
   ) : null;
 }
-export function Empty({ title = "暂无数据", children }: { title?: string; children?: ReactNode }) {
+export function Empty({ title, children }: { title?: string; children?: ReactNode }) {
+  const t = useT();
+  const heading = title ?? t("common.empty");
   return (
     <div className={s.empty}>
       <Icon name="leaf" />
-      <h3>{title}</h3>
+      <h3>{heading}</h3>
       {children && <p>{children}</p>}
     </div>
   );
@@ -89,12 +93,13 @@ export function ResourceState({
   error: string | null;
   reload: () => void;
 }) {
+  const t = useT();
   return (
     <>
       {loading && (
         <div className={s.loading} role="status">
           <span />
-          加载中…
+          {t("common.loading")}
         </div>
       )}
       <ErrorNotice message={error} retry={reload} />
@@ -145,6 +150,7 @@ export function Drawer({
   dismissDisabled?: boolean;
   className?: string;
 }) {
+  const t = useT();
   const exiting = useExiting();
   const ref = useRef<HTMLDialogElement>(null);
   const outside = useRef(false);
@@ -184,7 +190,12 @@ export function Drawer({
       <section className={`${s.drawer} ${className}`} inert={exiting}>
         <div className={s.drawerHead}>
           <h2 id={id}>{title}</h2>
-          <button type="button" aria-label="关闭抽屉" disabled={dismissDisabled} onClick={onClose}>
+          <button
+            type="button"
+            aria-label={t("common.closeDrawer")}
+            disabled={dismissDisabled}
+            onClick={onClose}
+          >
             <Icon name="close" />
           </button>
         </div>
@@ -195,13 +206,14 @@ export function Drawer({
 }
 export const CLEAR_CONFIRMATION = "清空全部日志与统计";
 export function ClearLogs({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const t = useT();
   const [scope, setScope] = useState<"details" | "all">("details");
   const [confirmation, setConfirmation] = useState("");
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   return (
-    <Drawer title="清理日志" onClose={onClose} dismissDisabled={busy}>
+    <Drawer title={t("logs.clear")} onClose={onClose} dismissDisabled={busy}>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -216,8 +228,7 @@ export function ClearLogs({ onClose, onDone }: { onClose: () => void; onDone: ()
               ...(scope === "all" ? { api_key: currentKey } : {}),
             })
             .then((response) => {
-              if (object(response.data).ok !== true)
-                throw new Error("后端未确认清理成功，请检查存储状态");
+              if (object(response.data).ok !== true) throw new Error(t("logs.clear.unconfirmed"));
               onDone();
               onClose();
             })
@@ -226,7 +237,7 @@ export function ClearLogs({ onClose, onDone }: { onClose: () => void; onDone: ()
         }}
       >
         <label className={s.field}>
-          清理范围
+          {t("logs.clear.scope")}
           <select
             value={scope}
             onChange={(e) => {
@@ -235,19 +246,15 @@ export function ClearLogs({ onClose, onDone }: { onClose: () => void; onDone: ()
               setKey("");
             }}
           >
-            <option value="details">仅清空明细 · 保留统计</option>
-            <option value="all">全部日志与统计</option>
+            <option value="details">{t("logs.clear.detailsOnly")}</option>
+            <option value="all">{t("logs.clear.everything")}</option>
           </select>
         </label>
         <div className={s.warning}>
           <Icon name="alert" />
           <div>
-            <strong>{scope === "all" ? CLEAR_CONFIRMATION : "仅清空日志明细，保留累计统计"}</strong>
-            <p>
-              {scope === "all"
-                ? "将永久删除全部请求明细、事件日志和历史统计，不可撤销。建议先备份；凭证及网关配置不受影响。"
-                : "将删除请求明细和事件日志，保留历史统计。不可撤销，建议先备份。"}
-            </p>
+            <strong>{scope === "all" ? CLEAR_CONFIRMATION : t("logs.clear.detailsStrong")}</strong>
+            <p>{scope === "all" ? t("logs.clear.allWarning") : t("logs.clear.detailsWarning")}</p>
           </div>
         </div>
         {scope === "all" && (
@@ -261,7 +268,7 @@ export function ClearLogs({ onClose, onDone }: { onClose: () => void; onDone: ()
               />
             </label>
             <label className={s.field}>
-              当前 API key
+              {t("common.currentApiKey")}
               <input
                 type="password"
                 value={key}
@@ -277,7 +284,7 @@ export function ClearLogs({ onClose, onDone }: { onClose: () => void; onDone: ()
           className={s.danger}
           disabled={busy || (scope === "all" && (confirmation !== CLEAR_CONFIRMATION || !key))}
         >
-          {busy ? "正在清理…" : "确认不可撤销的清理"}
+          {busy ? t("logs.clear.busy") : t("logs.clear.confirm")}
         </button>
       </form>
     </Drawer>

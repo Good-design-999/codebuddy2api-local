@@ -15,7 +15,7 @@ import time
 import uuid
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _CLEANUP_BATCH = 128
 _CLEANUP_SECONDS = 0.05
 METRICS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",
@@ -32,6 +32,16 @@ def safe_label(value: Any, limit: int = 160) -> str | None:
         return None
     return value
 
+
+
+def safe_agent(value: Any) -> str | None:
+    """Single-line printable User-Agent snippet; never header-shaped secrets."""
+    if not isinstance(value, str):
+        return None
+    cleaned = " ".join(value.split())[:200]
+    if not cleaned or not all(0x20 <= ord(char) <= 0x7E for char in cleaned):
+        return None
+    return None if _SECRET.search(cleaned) else cleaned
 
 def number(value: Any) -> int | float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -124,7 +134,7 @@ class AuditStore:
             self._db.execute("BEGIN IMMEDIATE")
             version = self._db.execute("PRAGMA user_version").fetchone()[0]
             tables = self._db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-            if version not in (0, 1, SCHEMA_VERSION) or (version == 0 and tables):
+            if version not in (0, 1, 2, SCHEMA_VERSION) or (version == 0 and tables):
                 raise ValueError("unsupported audit schema")
             self._db.execute("CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), epoch INTEGER NOT NULL, detail_generation INTEGER NOT NULL, cleared_at REAL NOT NULL)")
             self._db.execute("INSERT OR IGNORE INTO state VALUES(1,0,0,0)")
@@ -138,6 +148,7 @@ class AuditStore:
             for table in ("stats_hourly", "stats_daily", "stats_totals"):
                 self._db.execute(f"CREATE TABLE IF NOT EXISTS {table} (bucket INTEGER NOT NULL, dimension TEXT NOT NULL, dimension_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(bucket,dimension,dimension_key))")
             self._migrate_ingest_time()
+            self._migrate_client_ip()
             self._db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             self._epoch = self._db.execute("SELECT epoch FROM state").fetchone()[0]
             self._db.execute("COMMIT")
@@ -154,6 +165,15 @@ class AuditStore:
                 (SELECT started_at FROM requests WHERE requests.id=ingest.id),
                 (SELECT started_at FROM events WHERE events.id=ingest.id), ?)""", (time.time(),))
         self._db.execute("CREATE INDEX IF NOT EXISTS ingest_time ON ingest(created_at)")
+
+    def _migrate_client_ip(self):
+        # Additive v3 migration: record the audit-visible client address per request.
+        columns = [row[1] for row in self._db.execute("PRAGMA table_info(requests)").fetchall()]
+        if "client_ip" not in columns:
+            self._db.execute("ALTER TABLE requests ADD COLUMN client_ip TEXT")
+        # Exact-match client filters must not scan the retained time range.
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS requests_client ON requests(client_ip, started_at)")
 
     def _init_accounting(self):
         # Additive v1 migration: scan legacy details only once, under the same
@@ -280,6 +300,8 @@ class AuditStore:
     def _sanitize_record(self, source):
         result = {key: safe_label(source.get(key)) for key in
                   ("upstream_model", "profile", "credential", "protocol", "error_code", "usage_source")}
+        result["client_ip"] = safe_label(source.get("client_ip"))
+        result["user_agent"] = safe_agent(source.get("user_agent"))
         result["stream_mode"] = (source.get("stream_mode")
                                  if source.get("stream_mode") in ("compatible", "realtime") else None)
         projection_mode = source.get("responses_projection_mode")
@@ -333,10 +355,12 @@ class AuditStore:
                     (generation is None or generation == state["detail_generation"]))
             if keep:
                 payload = json.dumps(data, separators=(",", ":"))
-                self._db.execute("INSERT INTO requests VALUES(?,?,?,?,?,?,?,?,?)", (
-                    data["id"], data["started_at"], data["model"], data["profile"], data["credential"],
-                    data["outcome"], data["status_code"], payload,
-                    len(payload.encode()) + sum(len(json.dumps(a).encode()) + 32 for a in data["attempts"]) + 256))
+                self._db.execute(
+                    "INSERT INTO requests(id,started_at,model,profile,credential,outcome,status_code,payload,logical_bytes,client_ip) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (data["id"], data["started_at"], data["model"], data["profile"], data["credential"],
+                     data["outcome"], data["status_code"], payload,
+                     len(payload.encode()) + sum(len(json.dumps(a).encode()) + 32 for a in data["attempts"]) + 256,
+                     data["client_ip"]))
                 for i, attempt in enumerate(data["attempts"]):
                     self._db.execute("INSERT INTO attempts VALUES(?,?,?)", (data["id"], i, json.dumps(attempt)))
             self._prune()
@@ -450,7 +474,7 @@ class AuditStore:
             clauses.append("(started_at<? OR (started_at=? AND id<?))")
             params.extend((stamp, stamp, record_id))
         if kind == "request":
-            for key in ("model", "profile", "credential", "outcome", "status_code"):
+            for key in ("model", "profile", "credential", "outcome", "status_code", "client_ip"):
                 value = filters.get(key)
                 if value is not None and value != "":
                     clauses.append(f"{key}=?")

@@ -1,6 +1,7 @@
 import { useId, useState, type PointerEvent } from "react";
 import { metric, number, text, type RecordValue } from "./api";
 import { Empty } from "./components";
+import { useT } from "./i18n";
 import s from "./ui.module.scss";
 
 export function Trend({
@@ -12,11 +13,12 @@ export function Trend({
   granularity?: string;
   partial?: boolean;
 }) {
+  const t = useT();
   const id = useId();
   const [selection, setSelection] = useState<{ rows: RecordValue[]; index: number } | null>(null);
   const active = selection?.rows === rows ? selection.index : null;
   if (!rows.length)
-    return <Empty title={partial ? "该范围缺少小时记录" : "当前时间范围内暂无请求"} />;
+    return <Empty title={partial ? t("trend.partialRange") : t("trend.emptyRange")} />;
   const max = Math.max(1, ...rows.map((r) => number(r.requests) ?? 0));
   const first = number(rows[0].bucket),
     last = number(rows.at(-1)?.bucket);
@@ -53,7 +55,7 @@ export function Trend({
           className={s.chart}
           role="img"
           tabIndex={0}
-          aria-label={granularity === "hour" ? "按小时请求量趋势" : "按日请求量趋势"}
+          aria-label={granularity === "hour" ? t("dash.trend.hourly") : t("dash.trend.daily")}
           aria-describedby={`${id}-hint${selected ? ` ${id}-tooltip` : ""}`}
           onPointerMove={pointer}
           onPointerDown={pointer}
@@ -139,15 +141,15 @@ export function Trend({
             <strong>{text(selected.date)} · UTC</strong>
             <dl>
               <div>
-                <dt>请求</dt>
+                <dt>{t("dash.requests")}</dt>
                 <dd>{metric(selected.requests)}</dd>
               </div>
               <div>
-                <dt>成功</dt>
+                <dt>{t("logs.outcome.success")}</dt>
                 <dd>{metric(selected.success)}</dd>
               </div>
               <div>
-                <dt>失败</dt>
+                <dt>{t("logs.outcome.error")}</dt>
                 <dd>{metric(selected.error)}</dd>
               </div>
             </dl>

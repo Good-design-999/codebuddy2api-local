@@ -486,7 +486,7 @@ def install_admin(app, config, gateway):
             raise ValueError("limit 必须为整数") from None
         if not 1 <= limit <= 200:
             raise ValueError("limit 必须为 1 至 200")
-        filters = {key: params[key] for key in ("model", "credential", "profile", "status", "search") if key in params}
+        filters = {key: params[key] for key in ("model", "credential", "profile", "status", "search", "client_ip") if key in params}
         if any(len(value) > 256 for value in filters.values()) or len(params.get("cursor", "")) > 2048:
             raise ValueError("日志筛选参数过长")
         result = await run_in_threadpool(audit.list_records, kind, limit, params.get("cursor"), **filters)

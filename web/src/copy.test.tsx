@@ -154,7 +154,7 @@ describe("concise user-facing copy", () => {
     expect(screen.getByRole("alert").textContent).toBe("统计可能不完整，请检查日志存储状态。");
     expect(screen.getByText("人工停用")).toBeTruthy();
     expect(screen.getByText("1 个模型冷却")).toBeTruthy();
-    expect(screen.getAllByText("未知").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
     expect(screen.getByText("网关已知 Credit").closest("section")?.textContent).toContain("0");
     expect(container.textContent).not.toMatch(
       /一个客户端请求只统计一次|未知用量不计为零|人工状态与熔断独立|未导入的旧文本日志/,

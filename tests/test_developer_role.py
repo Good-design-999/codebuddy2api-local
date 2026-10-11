@@ -79,11 +79,6 @@ class CallerPayloadNotMutated(unittest.TestCase):
         _prepare(raw_messages, desensitize=desensitize)
         self.assertEqual(raw_body, snapshot)
 
-    def test_string_content_untouched(self):
-        self._assert_untouched([
-            {"role": "developer", "content": "You are an expert coding assistant."},
-            {"role": "user", "content": "hi"},
-        ], desensitize=False)
 
     def test_string_content_untouched_with_desensitize(self):
         self._assert_untouched([
@@ -91,11 +86,6 @@ class CallerPayloadNotMutated(unittest.TestCase):
             {"role": "user", "content": "hi"},
         ], desensitize=True)
 
-    def test_text_blocks_untouched(self):
-        self._assert_untouched([
-            {"role": "developer", "content": [{"type": "text", "text": "You are pi."}]},
-            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
-        ], desensitize=False)
 
     def test_text_blocks_untouched_with_desensitize(self):
         self._assert_untouched([

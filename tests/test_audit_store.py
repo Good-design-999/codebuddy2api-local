@@ -135,6 +135,23 @@ class AuditStoreTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(self.store.storage()["last_error"], "TimeoutError")
 
+    def test_transient_fault_degrades_only_within_window(self):
+        with patch.object(self.store, "_aggregate", side_effect=sqlite3.OperationalError("boom")):
+            self.assertFalse(self.store.record_request(self.record())["ok"])
+        health = self.store.storage()
+        self.assertTrue(health["degraded"])
+        self.assertEqual(health["recent_failures"], 1)
+        self.assertEqual(health["failure_count"], 1)
+        self.assertGreater(health["last_failure_at"], 0)
+        # 窗口之外：横幅消失，但终身计数与最近异常仍如实保留。
+        self.store.failure_events = [time.monotonic() - 25 * 3600]
+        health = self.store.storage()
+        self.assertFalse(health["degraded"])
+        self.assertEqual(health["recent_failures"], 0)
+        self.assertEqual(health["failure_count"], 1)
+        self.assertEqual(health["dropped_records"], 1)
+        self.assertEqual(health["last_error"], "OperationalError")
+
     def test_v1_ingest_table_migrates_with_backfilled_timestamps(self):
         """Migrate v1 ingest timestamps and indexes while preserving retained deduplication."""
         with tempfile.TemporaryDirectory() as td:

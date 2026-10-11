@@ -98,6 +98,9 @@ def _secure_path(path: str | os.PathLike) -> Path:
 
 
 class AuditStore:
+    # 一次瞬时写失败只让降级标记保持一天；终身计数仍如实上报，不随时间消失。
+    DEGRADED_WINDOW_SECONDS = 24 * 3600
+
     def __init__(self, path, max_bytes=256 * 1024 * 1024, retention_days=30,
                  preview_limit=8192):
         self._validate(max_bytes, retention_days, preview_limit)
@@ -105,6 +108,8 @@ class AuditStore:
         self._lock = threading.Lock()
         self._health_lock = threading.Lock()
         self.failure_count = self.dropped_records = 0
+        self.failure_events: list[float] = []
+        self.last_failure_at: float | None = None
         self.last_error = None
         self._closed = False
         self._epoch = 0
@@ -177,8 +182,18 @@ class AuditStore:
         with self._health_lock:
             self.failure_count += 1
             self.dropped_records += int(dropped)
+            self.failure_events.append(time.monotonic())
+            self.last_failure_at = time.time()
             # Exception messages may include SQL or user data; retain only type.
             self.last_error = type(exc).__name__
+
+    def _recent_failures(self):
+        # 只统计降级窗口内的失败，瞬时抖动过后横幅自动消失；计数不丢历史。
+        with self._health_lock:
+            deadline = time.monotonic() - self.DEGRADED_WINDOW_SECONDS
+            while self.failure_events and self.failure_events[0] <= deadline:
+                self.failure_events.pop(0)
+            return len(self.failure_events)
 
     def note_failure(self, code="ObservationError"):
         self._fault(RuntimeError(), dropped=True)
@@ -530,10 +545,12 @@ class AuditStore:
             except OSError as exc:
                 self._fault(exc)
                 sizes[key] = None
+        recent = self._recent_failures()
         return {**result, **sizes, "max_bytes": self.max_bytes, "retention_days": self.retention_days,
                 "preview_limit": self.preview_limit, "schema_version": SCHEMA_VERSION, "epoch": self._epoch,
-                "degraded": bool(self.failure_count), "failure_count": self.failure_count,
+                "degraded": bool(recent), "recent_failures": recent, "failure_count": self.failure_count,
                 "dropped_records": self.dropped_records, "last_error": self.last_error,
+                "last_failure_at": self.last_failure_at,
                 "closed": self._closed, "budget_scope": "details_logical_bytes",
                 "fault_counter_scope": "process_lifetime", "automatic_vacuum": False,
                 "lock_timeout_ms": 250, "sql_deadline_ms": 1000}

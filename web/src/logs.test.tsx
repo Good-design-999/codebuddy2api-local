@@ -49,7 +49,12 @@ describe("runtime event labels", () => {
       data: {
         items: [
           { id: "event-1", kind: "runtime", action: "credential.sync", started_at: 1 },
-          { id: "event-2", kind: "admin", action: "mystery.action", details: { outcome: "success" } },
+          {
+            id: "event-2",
+            kind: "admin",
+            action: "mystery.action",
+            details: { outcome: "success" },
+          },
         ],
         has_more: false,
         next_cursor: null,

@@ -281,7 +281,7 @@ export function Logs() {
                                     : "neutral"
                             }
                           >
-                            {outcomeLabels[outcome] ??
+                            {(typeof outcome === "string" ? outcomeLabels[outcome] : undefined) ??
                               text(outcome ?? item.level ?? item.status)}
                           </Badge>
                           {item.status_code !== undefined && (

@@ -24,7 +24,18 @@ import {
   ResourceState,
   profileLabel,
 } from "../components";
-import { CapabilityBadges, ModelMetadata, modelDisplayName } from "../modelMetadata";
+import {
+  CapabilityChips,
+  EffortChips,
+  ModelMetadata,
+  SpecValue,
+  effortSummary,
+  formatRate,
+  modelDisplayName,
+  modelSearchText,
+  rateOf,
+  specRange,
+} from "../modelMetadata";
 import s from "../ui.module.scss";
 export const profiles = ["cn-cli", "cn-work", "intl-cli", "intl-work"];
 const validId = (id: string) => /^[A-Za-z0-9_.:/@-]{1,160}$/.test(id) && ![".", ".."].includes(id);
@@ -85,6 +96,37 @@ function RoutePreview({ preview }: { preview: Preview }) {
         ))}
       </div>
     </Panel>
+  );
+}
+
+function RateCell({ model }: { model: ModelRule }) {
+  const rate = rateOf(model.credits);
+  if (rate === null)
+    return (
+      <>
+        <DataValue value={model.credits} />
+        <small className={s.specNote}>产品倍率未知</small>
+      </>
+    );
+  const perProfile =
+    model.credits_by_profile &&
+    typeof model.credits_by_profile === "object" &&
+    !Array.isArray(model.credits_by_profile)
+      ? Object.entries(model.credits_by_profile)
+      : [];
+  const rows = perProfile.filter(([, price]) => perProfile.length > 1 || rateOf(price) !== rate);
+  return (
+    <div className={s.rateStack}>
+      <span className={rate === 0 ? `${s.rateChip} ${s.rateFree}` : s.rateChip}>
+        {rate === 0 ? "限时免费 0x" : formatRate(rate)}
+      </span>
+      {rows.map(([profile, price]) => (
+        <small className={s.rateProfile} key={profile}>
+          {profileLabel(profile)}{" "}
+          {rateOf(price) === null ? "未知" : formatRate(rateOf(price) as number)}
+        </small>
+      ))}
+    </div>
   );
 }
 export function ModelEditor({
@@ -405,6 +447,51 @@ const emptyRule: ModelRule = {
   profile: "",
   credential_ids: [],
 };
+type SortKey = "catalog" | "rate" | "context" | "output" | "name";
+type CatalogFilter = { region: string; capability: string; effort: string; price: string };
+const emptyFilter: CatalogFilter = { region: "", capability: "", effort: "", price: "" };
+const EFFORT_FILTERS = ["low", "medium", "high", "xhigh", "max"];
+function rateValue(model: ModelRule): number {
+  return rateOf(model.credits) ?? Number.POSITIVE_INFINITY;
+}
+function sortModels(list: ModelRule[], key: SortKey): ModelRule[] {
+  if (key === "catalog") return list;
+  const out = list.slice();
+  const widest = (model: ModelRule, kind: "input" | "output") =>
+    specRange(model, kind === "input" ? "maxInputTokens" : "maxOutputTokens").at(-1) ?? 0;
+  if (key === "rate") out.sort((a, b) => rateValue(a) - rateValue(b));
+  else if (key === "context") out.sort((a, b) => widest(b, "input") - widest(a, "input"));
+  else if (key === "output") out.sort((a, b) => widest(b, "output") - widest(a, "output"));
+  else out.sort((a, b) => a.public_id.localeCompare(b.public_id));
+  return out;
+}
+function matchesCatalog(model: ModelRule, query: string, filter: CatalogFilter): boolean {
+  if (query) {
+    const text = modelSearchText(model);
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.every((term) => text.includes(term))) return false;
+  }
+  if (filter.region) {
+    if (filter.region === "auto") {
+      if (bindingMode(model) !== "auto") return false;
+    } else if (model.region !== filter.region) return false;
+  }
+  if (filter.capability) {
+    const declared =
+      model.capabilities && typeof model.capabilities === "object"
+        ? (model.capabilities as RecordValue)
+        : {};
+    if (declared[filter.capability] !== "supported") return false;
+  }
+  if (filter.effort) {
+    const efforts = effortSummary(model);
+    if (filter.effort === "off" ? !efforts.closable : !efforts.options.includes(filter.effort))
+      return false;
+  }
+  if (filter.price === "free" && rateOf(model.credits) !== 0) return false;
+  if (filter.price === "paid" && (rateOf(model.credits) ?? 0) <= 0) return false;
+  return true;
+}
 export function Models() {
   const resource = useResource("/models", modelResponse);
   const credentials = useResource("/credentials", credentialResponse);
@@ -416,11 +503,13 @@ export function Models() {
   const [deleting, setDeleting] = useState<ModelRule | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const rows = resource.data?.models.filter((m) =>
-    `${m.upstream_id ?? m.id} ${m.public_id} ${modelDisplayName(m)}`
-      .toLowerCase()
-      .includes(query.toLowerCase()),
+  const [filter, setFilter] = useState<CatalogFilter>(emptyFilter);
+  const [sort, setSort] = useState<SortKey>("catalog");
+  const filtering = Boolean(
+    query || filter.region || filter.capability || filter.effort || filter.price,
   );
+  const matched = resource.data?.models.filter((m) => matchesCatalog(m, query, filter));
+  const rows = matched && sortModels(matched, sort);
   return (
     <>
       <PageTitle
@@ -452,23 +541,95 @@ export function Models() {
       <ErrorNotice message={credentials.error} retry={credentials.reload} />
       <Panel
         title="模型目录"
-        hint={resource.data ? `${resource.data.models.length} 个模型` : undefined}
+        hint={
+          resource.data
+            ? filtering && rows
+              ? `命中 ${rows.length} / ${resource.data.models.length} 个模型`
+              : `${resource.data.models.length} 个模型`
+            : undefined
+        }
       >
         <div className={s.toolbar}>
           <input
             aria-label="搜索模型"
-            placeholder="搜索对外 ID、上游模型或显示名称…"
+            placeholder="搜索 ID、名称、描述、厂商，支持空格分隔多关键词…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
-          <Badge tone={resource.data?.model_capability_guard === false ? "warn" : "neutral"}>
-            能力预检：
-            {resource.data?.model_capability_guard === undefined
-              ? "未知"
-              : resource.data.model_capability_guard
-                ? "开启"
-                : "关闭"}
-          </Badge>
+          <div className={s.filterBar}>
+            <select
+              aria-label="筛选区域"
+              value={filter.region}
+              onChange={(e) => setFilter({ ...filter, region: e.target.value })}
+            >
+              <option value="">全部区域</option>
+              <option value="auto">自动选择</option>
+              <option value="cn">中国大陆</option>
+              <option value="intl">国际</option>
+            </select>
+            <select
+              aria-label="筛选能力"
+              value={filter.capability}
+              onChange={(e) => setFilter({ ...filter, capability: e.target.value })}
+            >
+              <option value="">全部能力</option>
+              <option value="images">支持视觉</option>
+              <option value="tools">支持工具</option>
+              <option value="reasoning">支持思考</option>
+            </select>
+            <select
+              aria-label="筛选思考"
+              value={filter.effort}
+              onChange={(e) => setFilter({ ...filter, effort: e.target.value })}
+            >
+              <option value="">全部档位</option>
+              <option value="off">可关闭思考</option>
+              {EFFORT_FILTERS.map((value) => (
+                <option key={value} value={value}>
+                  {value}
+                </option>
+              ))}
+            </select>
+            <select
+              aria-label="筛选价格"
+              value={filter.price}
+              onChange={(e) => setFilter({ ...filter, price: e.target.value })}
+            >
+              <option value="">全部价格</option>
+              <option value="free">限时免费</option>
+              <option value="paid">收费</option>
+            </select>
+            <select
+              aria-label="排序方式"
+              value={sort}
+              onChange={(e) => setSort(e.target.value as SortKey)}
+            >
+              <option value="catalog">目录顺序</option>
+              <option value="rate">倍率 低 → 高</option>
+              <option value="context">上下文 大 → 小</option>
+              <option value="output">最大输出 大 → 小</option>
+              <option value="name">模型 ID A → Z</option>
+            </select>
+            {filtering && (
+              <button
+                onClick={() => {
+                  setQuery("");
+                  setFilter(emptyFilter);
+                  setSort("catalog");
+                }}
+              >
+                重置
+              </button>
+            )}
+            <Badge tone={resource.data?.model_capability_guard === false ? "warn" : "neutral"}>
+              能力预检：
+              {resource.data?.model_capability_guard === undefined
+                ? "未知"
+                : resource.data.model_capability_guard
+                  ? "开启"
+                  : "关闭"}
+            </Badge>
+          </div>
         </div>
         {rows &&
           (rows.length ? (
@@ -476,10 +637,12 @@ export function Models() {
               <table>
                 <thead>
                   <tr>
-                    <th>对外模型 / 上游 ID</th>
-                    <th>状态</th>
-                    <th>目录倍率</th>
-                    <th>能力（上游声明）</th>
+                    <th>模型 ID</th>
+                    <th>消费倍率 / 优惠</th>
+                    <th>模型能力</th>
+                    <th>上下文窗口</th>
+                    <th>最大输出</th>
+                    <th>思考档位</th>
                     <th>路由边界</th>
                     <th>操作</th>
                   </tr>
@@ -488,40 +651,34 @@ export function Models() {
                   {rows.map((m) => (
                     <tr key={m.id}>
                       <td>
-                        <strong className={s.modelName}>{m.public_id}</strong>
-                        <small className={s.mono}>{m.upstream_id ?? m.id}</small>
-                        {modelDisplayName(m) && <small>{modelDisplayName(m)}</small>}
-                        {m.keep_original && <small>同时保留 {m.id}</small>}
-                      </td>
-                      <td>
-                        <div className={s.badgeStack}>
-                          <Badge tone={m.enabled ? "good" : "neutral"}>
-                            {m.enabled ? "已启用" : "已停用"}
-                          </Badge>
-                          {m.custom && <Badge>自建</Badge>}
-                          {m.available === false && m.enabled && (
-                            <Badge tone="warn">暂无候选</Badge>
-                          )}
+                        <div className={s.modelCell}>
+                          <div className={s.modelIdLine}>
+                            <strong className={s.modelName}>{m.public_id}</strong>
+                            {!m.enabled && <Badge tone="neutral">已停用</Badge>}
+                            {m.custom && <Badge>自建</Badge>}
+                            {m.available === false && m.enabled && (
+                              <Badge tone="warn">暂无候选</Badge>
+                            )}
+                          </div>
+                          <small className={s.mono}>{m.upstream_id ?? m.id}</small>
+                          {modelDisplayName(m) && <small>{modelDisplayName(m)}</small>}
+                          {m.keep_original && <small>同时保留 {m.id}</small>}
                         </div>
                       </td>
                       <td>
-                        <DataValue value={m.credits} />
-                        {m.credits_by_profile &&
-                        typeof m.credits_by_profile === "object" &&
-                        !Array.isArray(m.credits_by_profile) ? (
-                          <div className={s.priceList}>
-                            {Object.entries(m.credits_by_profile).map(([profile, price]) => (
-                              <small key={profile}>
-                                {profileLabel(profile)} <DataValue value={price} />
-                              </small>
-                            ))}
-                          </div>
-                        ) : (
-                          <small>产品倍率未知</small>
-                        )}
+                        <RateCell model={m} />
+                      </td>
+                      <td className={s.capCell}>
+                        <CapabilityChips model={m} />
+                      </td>
+                      <td className={s.specCell}>
+                        <SpecValue model={m} kind="input" />
+                      </td>
+                      <td className={s.specCell}>
+                        <SpecValue model={m} kind="output" />
                       </td>
                       <td>
-                        <CapabilityBadges model={m} />
+                        <EffortChips model={m} />
                       </td>
                       <td>
                         {m.credential_ids.length

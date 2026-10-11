@@ -1,7 +1,17 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { api, type ModelRule } from "./api";
-import { CapabilityBadges, ModelMetadata } from "./modelMetadata";
+import {
+  CapabilityBadges,
+  EffortChips,
+  ModelMetadata,
+  effortSummary,
+  formatRate,
+  formatTokens,
+  modelSearchText,
+  rateOf,
+  specRange,
+} from "./modelMetadata";
 import { Models } from "./pages/Models";
 import { Settings } from "./pages/Settings";
 
@@ -35,7 +45,11 @@ const model: ModelRule = {
         maxInputTokens: 192000,
         maxOutputTokens: 64000,
         iconUrl: "https://example.invalid/model.svg",
-        reasoning: { supportedEfforts: ["low", "high"], canDisableThinking: false },
+        reasoning: {
+          supportedEfforts: ["low", "high"],
+          defaultEffort: "high",
+          canDisableThinking: false,
+        },
         contextWindow: { defaultLength: 192000, supportedLengths: [64000, 192000] },
       },
     ],
@@ -143,10 +157,74 @@ describe("model declarations", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "搜索模型" }), {
       target: { value: "Display" },
     });
+    expect(screen.getByText("192K")).toBeTruthy();
+    expect(screen.getByText("32K–64K")).toBeTruthy();
+    expect(screen.getByText("图片因路由而异")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "模型详情" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByRole("combobox", { name: "查看产品声明" })).toBeTruthy();
     expect(within(dialog).getByRole("heading", { name: "能力概要" })).toBeTruthy();
+  });
+});
+
+describe("model table summaries", () => {
+  it("formats token windows, rates and effort options from declarations", () => {
+    expect(formatTokens(1_000_000)).toBe("1M");
+    expect(formatTokens(192_000)).toBe("192K");
+    expect(specRange(model, "maxInputTokens")).toEqual([192000]);
+    expect(specRange(model, "maxOutputTokens")).toEqual([32000, 64000]);
+    expect(effortSummary(model)).toEqual({
+      options: ["low", "high"],
+      defaults: ["high"],
+      closable: false,
+      only: false,
+    });
+    expect(rateOf(0)).toBe(0);
+    expect(formatRate(0.114)).toBe("0.11x");
+    expect(rateOf("x0.5 credits")).toBeNull();
+    expect(rateOf(-1)).toBeNull();
+  });
+
+  it("falls back to contextWindow lengths when input tokens are missing", () => {
+    const windowOnly = {
+      metadata_by_profile: {
+        "cn-cli": [
+          {
+            id: "m",
+            contextWindow: { defaultLength: 300000, supportedLengths: [300000, 1000000] },
+          },
+        ],
+      },
+    };
+    expect(specRange(windowOnly, "maxInputTokens")).toEqual([300000]);
+    expect(specRange(windowOnly, "maxOutputTokens")).toEqual([]);
+  });
+});
+
+describe("effort and search summaries", () => {
+  it("marks the default effort and describes fixed or absent thinking", () => {
+    render(<EffortChips model={model} />);
+    expect(screen.getByTitle("默认档")).toBeTruthy();
+    render(
+      <EffortChips
+        model={{
+          capabilities: { reasoning: "supported" },
+          metadata_by_profile: {
+            "cn-cli": [{ id: "m", reasoning: { defaultEffort: "medium" } }],
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText("固定档 · 默认 medium")).toBeTruthy();
+    render(<EffortChips model={{ capabilities: { reasoning: "unsupported" } }} />);
+    expect(screen.getByText("不支持思考")).toBeTruthy();
+  });
+
+  it("searches across identifiers, names, descriptions and vendors", () => {
+    const text = modelSearchText(model);
+    expect(text).toContain("display model");
+    expect(text).toContain("中文说明");
+    expect(modelSearchText({ ...model, public_id: "" })).toContain("upstream");
   });
 });
 

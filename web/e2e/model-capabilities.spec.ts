@@ -113,7 +113,7 @@ for (const width of [1440, 375]) {
     });
     await page.goto("/dashboard/models");
     await expect(page.getByText("能力预检：开启")).toBeVisible();
-    await expect(page.getByText("图片：因路由而异")).toBeVisible();
+    await expect(page.getByText("图片因路由而异")).toBeVisible();
     const trigger = page.getByRole("button", { name: "模型详情" });
     await trigger.click();
     const dialog = page.getByRole("dialog");
@@ -146,7 +146,7 @@ for (const width of [1440, 375]) {
     await expect(page.getByText(/国际图片归并及其他安全限制不变/)).toBeVisible();
     await page.goto("/dashboard/models");
     await expect(page.getByText("能力预检：关闭")).toBeVisible();
-    await expect(page.getByText("图片：因路由而异")).toBeVisible();
+    await expect(page.getByText("图片因路由而异")).toBeVisible();
     expect(external).toEqual([]);
     expect(errors).toEqual([]);
   });

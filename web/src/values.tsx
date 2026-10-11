@@ -145,6 +145,7 @@ const labels: Record<string, string> = {
   degraded: "存储降级",
   failure_count: "失败次数",
   dropped_records: "未写入记录数",
+  recent_failures: "近期失败次数",
   closed: "存储已关闭",
   budget_scope: "容量统计范围",
   fault_counter_scope: "故障计数范围",

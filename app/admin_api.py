@@ -514,6 +514,33 @@ def install_admin(app, config, gateway):
             return error_response(503, "日志清理未完成，请检查审计存储状态")
         return JSONResponse(result)
 
+    @route("GET", "/admin/storage")
+    async def storage_get(request):
+        result = await run_in_threadpool(audit.storage)
+        if result.get("degraded"):
+            return error_response(503, "存储状态暂时无法读取，请检查审计存储")
+        archives = []
+        try:
+            directory = Path(str(audit.path)).parent / "archives"
+            archives = sorted((entry.name for entry in directory.glob("audit-*.jsonl")), reverse=True)[:20]
+        except OSError:
+            pass
+        return JSONResponse({**result, "archives": archives})
+
+    @route("POST", "/admin/storage/archive")
+    async def storage_archive(request):
+        body = await _body(request, 8192)
+        days = body.get("days")
+        if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 3650:
+            raise ValueError("归档窗口必须为 1 至 3650 天")
+        result = await run_in_threadpool(audit.archive, days)
+        if not result.get("ok"):
+            return error_response(503, "归档未完成，请检查审计存储状态")
+        event("storage_archive", {"days": days, "file": result.get("file"),
+                                  "requests": result.get("archived_requests"),
+                                  "events": result.get("archived_events")})
+        return JSONResponse(result)
+
     @route("GET", "/admin/dashboard")
     async def dashboard_get(request):
         try:

@@ -94,6 +94,23 @@ function SettingsForm({
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
+  const groups: [string, string, Setting[]][] = [
+    ["editable", "可修改", []],
+    ["external", "外部锁定", []],
+    ["system", "系统只读", []],
+  ];
+  for (const item of data.items) {
+    if (!item.locked) groups[0][2].push(item);
+    else if (["cli", "environment", "env", "dotenv"].includes(item.source)) groups[1][2].push(item);
+    else groups[2][2].push(item);
+  }
+  const [tab, setTab] = useState(groups[0][2].length ? "editable" : "external");
+  const visible = groups.find(([key]) => key === tab)?.[2] ?? [];
+  const emptyTitles: Record<string, string> = {
+    editable: "当前没有可管理配置",
+    external: "没有外部锁定的配置",
+    system: "没有系统只读项",
+  };
   const count = Object.keys(values).length;
   const update = (item: Setting, value: unknown) => {
     setSaved(false);
@@ -121,9 +138,23 @@ function SettingsForm({
           .finally(() => setBusy(false));
       }}
     >
+      <div className={s.tabs} role="tablist" aria-label="配置分组">
+        {groups.map(([key, label, rows]) => (
+          <button
+            key={key}
+            type="button"
+            role="tab"
+            aria-selected={tab === key}
+            className={tab === key ? s.selectedTab : ""}
+            onClick={() => setTab(key)}
+          >
+            {label}（{rows.length}）
+          </button>
+        ))}
+      </div>
       <Panel title="配置项">
-        {!data.items.length && <Empty title="当前没有可管理配置" />}
-        {data.items.map((item) => {
+        {!visible.length && <Empty title={emptyTitles[tab]} />}
+        {visible.map((item) => {
           const value = Object.hasOwn(values, item.key)
             ? values[item.key]
             : (item.stored ?? item.value);

@@ -267,6 +267,7 @@ describe("capability guard settings", () => {
   it("shows an environment-locked guard instead of an editable switch", async () => {
     vi.spyOn(api, "get").mockResolvedValue({ data: settings(true) });
     render(<Settings />);
+    fireEvent.click(await screen.findByRole("tab", { name: /外部锁定/ }));
     await screen.findByText("外部锁定");
     expect(screen.queryByRole("checkbox", { name: /模型能力预检/ })).toBeNull();
     expect(screen.getByText("当前生效：开启")).toBeTruthy();

@@ -117,8 +117,10 @@ function Shell() {
         <header className={s.header}>
           <span>
             {t("app.workspace")} <span className={s.separator}>/</span>{" "}
-            {navigation.find(([path]) => `/dashboard${path}` === location.pathname)?.[1] ??
-              "nav.overview"}
+            {t(
+              navigation.find(([path]) => `/dashboard${path}` === location.pathname)?.[1] ??
+                "nav.overview",
+            )}
           </span>
           <div className={s.actions}>
             <Appearance />

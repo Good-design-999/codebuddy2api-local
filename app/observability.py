@@ -103,9 +103,6 @@ def normalize_usage(usage):
     result = {}
     aliases = {"input_tokens": ("input_tokens", "prompt_tokens"),
                "output_tokens": ("output_tokens", "completion_tokens"),
-               "cache_read_tokens": ("cache_read_tokens", "cache_read_input_tokens", "cached_tokens", "cache"),
-               "cache_creation_tokens": ("cache_creation_tokens", "cache_creation_input_tokens"),
-               "reasoning_tokens": ("reasoning_tokens", "reasoning"),
                "total_tokens": ("total_tokens",), "credit": ("credit",)}
     for key, names in aliases.items():
         for name in names:
@@ -113,16 +110,29 @@ def normalize_usage(usage):
             if value is not None:
                 result[key] = value
                 break
-    for key, parents, child in (
-        ("cache_read_tokens", ("input_tokens_details", "prompt_tokens_details"), "cached_tokens"),
-        ("reasoning_tokens", ("output_tokens_details", "completion_tokens_details"), "reasoning_tokens"),
-    ):
-        if key not in result:
-            for parent in parents:
-                value = number(_mapping(usage.get(parent)).get(child))
-                if value is not None:
-                    result[key] = value
-                    break
+    # Providers report cache/reasoning counters through several fields at once,
+    # and some ship a permanent zero alias next to the real counter (CodeBuddy's
+    # top-level cached_tokens: 0 beside prompt_tokens_details.cached_tokens).
+    # The largest candidate wins so a broken zero cannot shadow a real value.
+    best_of = {
+        "cache_read_tokens": (
+            ("cache_read_tokens", "cache_read_input_tokens", "cached_tokens", "cache",
+             "prompt_cache_hit_tokens"),
+            ((("input_tokens_details", "prompt_tokens_details"), "cached_tokens"),)),
+        "cache_creation_tokens": (
+            ("cache_creation_tokens", "cache_creation_input_tokens", "prompt_cache_write_tokens"),
+            ()),
+        "reasoning_tokens": (
+            ("reasoning_tokens", "reasoning", "completion_thinking_tokens"),
+            ((("output_tokens_details", "completion_tokens_details"), "reasoning_tokens"),)),
+    }
+    for key, (names, nested) in best_of.items():
+        candidates = [number(usage.get(name)) for name in names]
+        for parents, child in nested:
+            candidates += [number(_mapping(usage.get(parent)).get(child)) for parent in parents]
+        present = [value for value in candidates if value is not None]
+        if present:
+            result[key] = max(present)
     return result
 
 

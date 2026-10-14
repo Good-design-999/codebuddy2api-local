@@ -198,7 +198,10 @@ test("isolated dashboard, deep routes, model conflict and schema settings", asyn
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.getByRole("link", { name: "系统设置" }).click();
+  // Externally locked items live behind their own tab now.
+  await page.getByRole("tab", { name: /外部锁定/ }).click();
   await expect(page.getByText("外部锁定", { exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: /可修改/ }).click();
   await page.getByLabel("审计明细保留天数").fill("60");
   await page.getByRole("button", { name: "保存更改" }).click();
   await expect

@@ -177,11 +177,8 @@ export function useResource<T>(
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
-        setState((prev) =>
-          prev.data === null
-            ? { data: null, loading: false, error: errorMessage(error) }
-            : { ...prev, loading: false },
-        );
+        // Keep stale data on screen during a failed refresh, but surface the error.
+        setState((prev) => ({ ...prev, loading: false, error: errorMessage(error) }));
       });
     return () => controller.abort();
   }, [path, revision, normalize, options?.cache]);

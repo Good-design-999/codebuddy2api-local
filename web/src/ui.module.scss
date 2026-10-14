@@ -2164,17 +2164,24 @@ $white: var(--page);
   font-size: 11px;
 }
 .chartTooltip dl {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  display: flex;
+  flex-direction: column;
   margin: 8px 0 0;
-  gap: 12px;
+  gap: 6px;
+}
+.chartTooltip dl > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
 }
 .chartTooltip dt {
   color: var(--muted);
+  white-space: nowrap;
 }
 .chartTooltip dd {
   margin: 0;
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }

@@ -76,8 +76,10 @@ test("per-account automation persists with scoped actions, dark mode and mobile 
   await expect(page.getByRole("switch", { name: "自动签到 intl.info" })).toBeChecked();
   await page.getByRole("switch", { name: "自动旅行 cn.info" }).click();
   await expect(page.getByText(/自动旅行已关闭/)).toBeVisible();
+  await page.getByRole("button", { name: "更多 cn.info" }).click();
   await page.getByRole("button", { name: "旅行状态 cn.info" }).click();
   await expect(page.getByText("部分完成")).toBeVisible();
+  await page.getByRole("button", { name: "更多 cn.info" }).click();
   await page.getByRole("button", { name: "旅行领派 cn.info" }).click();
   await expect(page.getByText(/领取已确认，后续状态查询失败/)).toBeVisible();
   expect(writes).toEqual([

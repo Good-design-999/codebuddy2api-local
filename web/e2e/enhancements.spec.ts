@@ -101,7 +101,7 @@ test("appearance persists, follows the system, and animates modal exit", async (
 test("trend has hover, keyboard and touch values without mobile overflow", async ({ page }) => {
   await fixture(page);
   await page.goto("/dashboard");
-  const chart = page.getByRole("img", { name: "按小时请求量趋势" });
+  const chart = page.getByRole("img", { name: "按小时用量趋势" });
   let box = (await chart.boundingBox())!;
   await page.mouse.move(box.x + box.width * 0.97, box.y + box.height * 0.5);
   await expect(page.getByRole("tooltip")).toContainText("03:00");
@@ -111,6 +111,7 @@ test("trend has hover, keyboard and touch values without mobile overflow", async
   await page.keyboard.press("End");
   await expect(page.getByRole("tooltip")).toContainText("03:00");
   await page.setViewportSize({ width: 390, height: 844 });
+  await chart.scrollIntoViewIfNeeded();
   box = (await chart.boundingBox())!;
   await page.touchscreen.tap(box.x + box.width * 0.65, box.y + box.height * 0.6);
   await expect(page.getByRole("tooltip")).toContainText("02:00");
@@ -123,12 +124,17 @@ test("credential refresh, checkin, sync and batch buttons stay separate", async 
   await page.goto("/dashboard/credentials");
   for (const label of [
     "刷新凭证 one.info",
-    "签到 one.info",
+    "menu:签到 one.info",
     "同步余额 one.info",
     "批量签到",
     "同步全部余额",
   ]) {
-    await page.getByRole("button", { name: label, exact: true }).click();
+    if (label.startsWith("menu:")) {
+      await page.getByRole("button", { name: "更多 one.info" }).click();
+      await page.getByRole("button", { name: label.slice(5), exact: true }).click();
+    } else {
+      await page.getByRole("button", { name: label, exact: true }).click();
+    }
     await expect(page.getByText("隔离测试操作成功")).toBeVisible();
   }
   expect(calls).toEqual([

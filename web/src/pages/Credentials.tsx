@@ -115,7 +115,7 @@ function ImportDrawer({ onClose, onDone }: { onClose: () => void; onDone: () => 
   );
 }
 
-function MoreMenu({ children }: { children: ReactNode }) {
+function MoreMenu({ label, children }: { label?: string; children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -135,7 +135,12 @@ function MoreMenu({ children }: { children: ReactNode }) {
   }, [open]);
   return (
     <div className={s.moreMenu} ref={ref}>
-      <button aria-expanded={open} aria-haspopup="menu" onClick={() => setOpen(!open)}>
+      <button
+        aria-label={label}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        onClick={() => setOpen(!open)}
+      >
         更多
       </button>
       {open && (
@@ -573,7 +578,7 @@ export function Credentials() {
                             >
                               同步余额
                             </button>
-                            <MoreMenu>
+                            <MoreMenu label={`更多 ${c.name ?? c.id}`}>
                               <button
                                 disabled={busy || c.enabled !== true}
                                 aria-label={`签到 ${c.name ?? c.id}`}

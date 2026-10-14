@@ -230,9 +230,10 @@ const TREND_SERIES = [
   { key: "credit", labelKey: "dash.kpi.credit", color: "var(--series-credit)" },
 ] as const;
 
-const LEFT = 56,
+const LEFT = 40,
   HOUR_STEP = 3600,
-  RIGHT_PAD = 140,
+  RIGHT_PAD = 88,
+  NARROW_RIGHT_PAD = 46,
   TOP = 14,
   BOTTOM = 168,
   CHART_HEIGHT = 210;
@@ -264,7 +265,8 @@ export function UsageTrend({
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
-  const RIGHT = Math.max(LEFT + 60, width - RIGHT_PAD);
+  const narrow = width < 520;
+  const RIGHT = Math.max(LEFT + 60, width - (narrow ? NARROW_RIGHT_PAD : RIGHT_PAD));
   const [selection, setSelection] = useState<{ rows: RecordValue[]; index: number } | null>(null);
   const [zoom, setZoom] = useState<{ rows: RecordValue[]; domain: [number, number] } | null>(null);
   const domain = zoom?.rows === rows ? zoom.domain : null;
@@ -333,14 +335,17 @@ export function UsageTrend({
     if (displayRows.length === 1) return (LEFT + RIGHT) / 2;
     const b = number(displayRows[index].bucket);
     if (bucketsValid && b !== null) return LEFT + ((b - ds) * (RIGHT - LEFT)) / (de - ds);
-    return LEFT + (index * (RIGHT - LEFT)) / (rows.length - 1);
+    return LEFT + (index * (RIGHT - LEFT)) / (displayRows.length - 1);
   };
   const yAt = (key: string, index: number) =>
-    BOTTOM - ((number(rows[index][key]) ?? 0) / (maxima[key] ?? 1)) * (BOTTOM - TOP);
+    BOTTOM - ((number(displayRows[index][key]) ?? 0) / (maxima[key] ?? 1)) * (BOTTOM - TOP);
   const pathOf = (key: string) =>
-    smoothPath(rows.map((_, i): [number, number] => [xAt(i), yAt(key, i)]));
+    smoothPath(displayRows.map((_, i): [number, number] => [xAt(i), yAt(key, i)]));
   const choose = (index: number) =>
-    setSelection({ rows, index: Math.max(0, Math.min(rows.length - 1, index)) });
+    setSelection({
+      rows: displayRows,
+      index: Math.max(0, Math.min(displayRows.length - 1, index)),
+    });
   const pointer = (event: PointerEvent<SVGSVGElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     if (!rect.width) return;
@@ -437,12 +442,14 @@ export function UsageTrend({
                 <text x={LEFT - 6} y={y + 3} textAnchor="end" fill="var(--series-requests)">
                   {compact(Math.round((maxima.requests * i) / 4))}
                 </text>
-                <text x={RIGHT + 8} y={y + 3} fill="var(--series-credit)">
+                <text x={RIGHT + 6} y={y + 3} fill="var(--series-credit)">
                   {compact((maxima.credit * i) / 4)}
                 </text>
-                <text x={RIGHT + 72} y={y + 3} fill="var(--series-tokens)">
-                  {compact((maxima.total_tokens * i) / 4)}
-                </text>
+                {!narrow && (
+                  <text x={RIGHT + 48} y={y + 3} fill="var(--series-tokens)">
+                    {compact((maxima.total_tokens * i) / 4)}
+                  </text>
+                )}
               </g>
             );
           })}

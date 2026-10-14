@@ -11,9 +11,9 @@ function openRowMenu(credentialName: string) {
   const row = screen
     .getAllByText(credentialName)
     .map((el) => el.closest("tr"))
-    .find((tr) => tr && within(tr).queryByRole("button", { name: "更多" }));
+    .find((tr) => tr && within(tr).queryByRole("button", { name: /^更多/ }));
   if (!row) throw new Error(`row for ${credentialName} not found`);
-  fireEvent.click(within(row).getByRole("button", { name: "更多" }));
+  fireEvent.click(within(row).getByRole("button", { name: /^更多/ }));
 }
 
 vi.mock("./api", async (original) => ({

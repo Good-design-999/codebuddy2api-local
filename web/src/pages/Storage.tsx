@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api, errorMessage, number, object, text, useResource } from "../api";
+import { useT } from "../i18n";
 import {
   Badge,
   ClearLogs,
@@ -26,12 +27,13 @@ function bytes(value: unknown): string {
 }
 
 function ArchivePanel({ reload }: { reload: () => void }) {
+  const t = useT();
   const [days, setDays] = useState(30);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
   return (
-    <Panel title="归档旧日志" hint="导出为 JSONL 后从库中删除，统计聚合不受影响">
+    <Panel title={t("storage.archive")} hint={t("storage.archiveHint")}>
       <form
         className={s.archiveForm}
         onSubmit={(e) => {
@@ -42,12 +44,12 @@ function ArchivePanel({ reload }: { reload: () => void }) {
           void api
             .post("/storage/archive", { days })
             .then((response) => {
-              const d = object(response.data, "归档结果");
+              const d = object(response.data, t("storage.archiveResult"));
               const count = (number(d.archived_requests) ?? 0) + (number(d.archived_events) ?? 0);
               setResult(
                 count === 0
-                  ? `没有早于 ${days} 天的日志可归档`
-                  : `已归档 ${count} 条到 ${text(d.file)}`,
+                  ? t("storage.archiveEmpty", { days })
+                  : t("storage.archiveDone", { count, file: text(d.file) }),
               );
               reload();
             })
@@ -56,7 +58,7 @@ function ArchivePanel({ reload }: { reload: () => void }) {
         }}
       >
         <label className={s.field}>
-          归档早于（天）
+          {t("storage.archiveDays")}
           <input
             type="number"
             min={1}
@@ -66,7 +68,7 @@ function ArchivePanel({ reload }: { reload: () => void }) {
           />
         </label>
         <button className={s.primary} disabled={busy}>
-          {busy ? "正在归档…" : "归档并删除"}
+          {busy ? t("storage.archiveBusy") : t("storage.archiveSubmit")}
         </button>
       </form>
       {result && <p className={s.resultNote}>{result}</p>}
@@ -76,50 +78,58 @@ function ArchivePanel({ reload }: { reload: () => void }) {
 }
 
 export function Storage() {
+  const t = useT();
   const resource = useResource("/storage", normalize);
   const [clearing, setClearing] = useState(false);
   const d = resource.data;
   const reclaimable = number(d?.reclaimable_bytes);
   return (
     <>
-      <PageTitle title="存储管理" description="日志库体积、归档、清理与压缩指引。" />
+      <PageTitle title={t("storage.title")} description={t("storage.desc")} />
       <ResourceState {...resource} />
       {d && (
         <div className={s.dashboardGrid}>
-          <Panel title="存储状态">
+          <Panel title={t("storage.status")}>
             <Badge tone={d.degraded === true ? "bad" : d.degraded === false ? "good" : "neutral"}>
-              {d.degraded === true ? "存储异常" : d.degraded === false ? "正常" : "状态未知"}
+              {d.degraded === true
+                ? t("storage.stateDegraded")
+                : d.degraded === false
+                  ? t("dash.status.normal")
+                  : t("storage.stateUnknown")}
             </Badge>
             <div className={s.storageGrid}>
               <div>
-                <span>数据库文件</span>
+                <span>{t("storage.dbFile")}</span>
                 <strong>{bytes(d.db_bytes)}</strong>
               </div>
               <div>
-                <span>WAL 文件</span>
+                <span>{t("storage.walFile")}</span>
                 <strong>{bytes(d.wal_bytes)}</strong>
               </div>
               <div>
-                <span>日志逻辑占用</span>
+                <span>{t("storage.logical")}</span>
                 <strong>{bytes(d.logical_bytes)}</strong>
               </div>
               <div>
-                <span>可回收空间</span>
+                <span>{t("storage.reclaimable")}</span>
                 <strong>{bytes(d.reclaimable_bytes)}</strong>
               </div>
             </div>
             <small>
-              请求 {number(d.request_count) ?? "—"} 条 · 事件 {number(d.event_count) ?? "—"} 条 ·
-              保留 {number(d.retention_days) ?? "—"} 天
-              {d.pending_cleanup === true ? " · 有待清理数据" : ""}
+              {t("storage.counts", {
+                requests: number(d.request_count) ?? "—",
+                events: number(d.event_count) ?? "—",
+                days: number(d.retention_days) ?? "—",
+              })}
+              {d.pending_cleanup === true ? ` · ${t("storage.pendingCleanup")}` : ""}
             </small>
           </Panel>
-          <Panel title="清理">
-            <p>在线删除日志明细或全部日志与统计；全部清理需要确认文本与当前 API key。</p>
-            <button onClick={() => setClearing(true)}>打开清理</button>
+          <Panel title={t("storage.cleanup")}>
+            <p>{t("storage.cleanupDesc")}</p>
+            <button onClick={() => setClearing(true)}>{t("storage.cleanupOpen")}</button>
           </Panel>
           <ArchivePanel reload={resource.reload} />
-          <Panel title="归档文件">
+          <Panel title={t("storage.archives")}>
             {Array.isArray(d.archives) && d.archives.length ? (
               <ul className={s.archiveList}>
                 {d.archives.map((name) => (
@@ -127,28 +137,29 @@ export function Storage() {
                 ))}
               </ul>
             ) : (
-              <Empty title="暂无归档" />
+              <Empty title={t("storage.archivesEmpty")} />
             )}
           </Panel>
-          <Panel title="压缩数据库">
+          <Panel title={t("storage.vacuum")}>
             <p>
-              删除与归档释放的空间留在 SQLite 空闲页中
-              {reclaimable !== null && reclaimable > 0
-                ? `（当前约可回收 ${bytes(reclaimable)}）`
-                : ""}
-              。VACUUM 需要独占锁，不能在网关运行中执行，请按以下步骤操作：
+              {t("storage.vacuumDesc", {
+                reclaimable:
+                  reclaimable !== null && reclaimable > 0
+                    ? t("storage.vacuumReclaim", { size: bytes(reclaimable) })
+                    : "",
+              })}
             </p>
             <pre className={s.codeBlock}>
-              {`# 1. 停止网关
-docker compose down        # 本地部署则停止 converter 进程
+              {`${t("storage.step.stop")}
+docker compose down        ${t("storage.step.stopLocal")}
 
-# 2. 压缩（在部署目录执行）
+${t("storage.step.vacuum")}
 sqlite3 auth/logs.sqlite3 "PRAGMA wal_checkpoint(TRUNCATE); VACUUM;"
 
-# 3. 重启网关
+${t("storage.step.restart")}
 docker compose up -d`}
             </pre>
-            <small>压缩期间网关不可用；统计聚合保存在同一库中，VACUUM 不影响数据。</small>
+            <small>{t("storage.vacuumNote")}</small>
           </Panel>
         </div>
       )}

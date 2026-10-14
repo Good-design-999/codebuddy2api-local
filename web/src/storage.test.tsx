@@ -31,7 +31,7 @@ describe("storage page", () => {
     render(<Storage />);
     expect(await screen.findByText("可回收空间")).toBeTruthy();
     expect(screen.getAllByText("2.0 MB").length).toBeGreaterThan(0);
-    expect(screen.getByText(/当前约可回收 2.0 MB/)).toBeTruthy();
+    expect(screen.getByText(/约可回收 2.0 MB/)).toBeTruthy();
     expect(screen.getByText("audit-20260901-000000-abcdef12.jsonl")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "归档并删除" }));
     await waitFor(() => expect(post).toHaveBeenCalledWith("/storage/archive", { days: 30 }));

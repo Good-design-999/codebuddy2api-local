@@ -101,7 +101,10 @@ describe("official credits", () => {
         storage: {},
         range: { granularity: "day" },
         official_credits: {
-          "ent.info": { name: "ent", credits: { credits: null, unlimited: true, enterprise: true } },
+          "ent.info": {
+            name: "ent",
+            credits: { credits: null, unlimited: true, enterprise: true },
+          },
           "p1.info": { name: "p1", credits: { credits: 12.5 } },
         },
       },

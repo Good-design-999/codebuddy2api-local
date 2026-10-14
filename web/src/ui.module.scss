@@ -460,8 +460,8 @@ $white: var(--page);
 }
 .kpiCard strong {
   display: block;
-  font-size: 26px;
-  letter-spacing: -0.6px;
+  font-size: 22px;
+  letter-spacing: -0.4px;
   font-weight: 600;
   margin: 6px 0 2px;
   line-height: 1.2;
@@ -477,6 +477,142 @@ $white: var(--page);
   width: 100%;
   height: 26px;
   margin-top: 6px;
+}
+.kpiValue {
+  position: relative;
+  cursor: default;
+}
+.kpiTip {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 20;
+  display: none;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 120px;
+  padding: 8px 12px;
+  background: var(--primary);
+  color: var(--on-primary);
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+  box-shadow: 0 8px 22px var(--shadow);
+  pointer-events: none;
+  white-space: nowrap;
+}
+.kpiTip b {
+  font-size: 10px;
+  opacity: 0.75;
+  font-weight: 500;
+}
+.kpiValue:hover .kpiTip,
+.kpiValue:focus-visible .kpiTip {
+  display: flex;
+}
+.zoomReset {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  font-size: 10px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+}
+.zoomReset:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.moreMenu {
+  position: relative;
+  display: inline-block;
+}
+.moreMenuList {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 128px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 10px 26px var(--shadow);
+}
+.moreMenuList button {
+  width: 100%;
+  text-align: left;
+  white-space: nowrap;
+}
+.zoomHint {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--muted);
+  opacity: 0.8;
+}
+.storageGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+}
+.storageGrid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+.storageGrid span {
+  font-size: 10px;
+  color: var(--muted);
+}
+.storageGrid strong {
+  font-size: 15px;
+}
+.archiveForm {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+.archiveForm .field {
+  flex: 0 0 140px;
+}
+.archiveList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 11px;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 160px;
+  overflow: auto;
+}
+.resultNote {
+  font-size: 11px;
+  color: var(--accent);
+  margin: 8px 0 0;
+}
+.codeBlock {
+  font-size: 11px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  white-space: pre;
+  margin: 8px 0;
 }
 .chartLegend {
   display: flex;
@@ -526,8 +662,8 @@ $white: var(--page);
 }
 .chart {
   width: 100%;
-  min-height: 190px;
-  padding: 0 15px;
+  height: 210px;
+  display: block;
 }
 .chart text {
   font-size: 11px;
@@ -900,7 +1036,7 @@ $white: var(--page);
 }
 .details > div {
   display: grid;
-  grid-template-columns: minmax(100px, 0.85fr) minmax(0, 1.3fr);
+  grid-template-columns: 140px minmax(0, 1fr);
   gap: 15px;
   border-bottom: 1px solid #edf0e6;
   padding: 10px 0;
@@ -1850,7 +1986,8 @@ $white: var(--page);
   padding: 0 24px 20px;
 }
 .appearanceChoices,
-.paletteChoices {
+.paletteChoices,
+.langChoices {
   border: 0;
   padding: 0;
   margin: 18px 0 24px;
@@ -1859,7 +1996,8 @@ $white: var(--page);
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .appearanceChoices legend,
-.paletteChoices legend {
+.paletteChoices legend,
+.langChoices legend {
   margin-bottom: 12px;
   font-size: 12px;
   color: var(--muted);
@@ -1878,7 +2016,8 @@ $white: var(--page);
   font-size: 11px;
 }
 .appearanceChoices input,
-.paletteChoices input {
+.paletteChoices input,
+.langChoices input {
   position: absolute;
   opacity: 0;
   inset: 0;
@@ -2290,4 +2429,24 @@ $white: var(--page);
   .modalOverlay::backdrop {
     backdrop-filter: none;
   }
+}
+
+.langChoices label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  margin: 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 12px;
+  position: relative;
+  color: var(--muted);
+}
+.langChoices label:has(:checked) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--soft);
 }

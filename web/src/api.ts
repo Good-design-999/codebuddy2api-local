@@ -53,6 +53,16 @@ export function metric(value: unknown): string {
   const n = number(value);
   return n === null ? "—" : new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(n);
 }
+// Axis-scale abbreviation: 1234 → 1.2K, 429669080 → 429.7M; exact values stay in tooltips.
+export function compact(value: unknown): string {
+  const n = number(value);
+  if (n === null) return "—";
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+  if (abs >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (abs >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(n);
+}
 export function errorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
     const bodyData: unknown = error.response?.data;
@@ -138,29 +148,43 @@ export async function establishSession(apiKey?: string) {
     if (apiKey !== undefined) throw error;
   }
 }
-export function useResource<T>(path: string, normalize: (value: unknown) => T) {
+// Session-level response cache for heavy pages (model routing): reopening the
+// page renders the last snapshot instantly while a fresh fetch replaces it.
+const resourceCache = new Map<string, unknown>();
+export function useResource<T>(
+  path: string,
+  normalize: (value: unknown) => T,
+  options?: { cache?: boolean },
+) {
+  const cached = options?.cache ? resourceCache.get(path) : undefined;
   const [state, setState] = useState<{ data: T | null; loading: boolean; error: string | null }>({
-    data: null,
-    loading: true,
+    data: cached === undefined ? null : normalize(cached),
+    loading: cached === undefined,
     error: null,
   });
   const [revision, setRevision] = useState(0);
   const reload = useCallback(() => setRevision((v) => v + 1), []);
   useEffect(() => {
     const controller = new AbortController();
-    setState({ data: null, loading: true, error: null });
+    // A cached snapshot stays on screen during the refresh instead of flashing a spinner.
+    setState((prev) => ({ data: prev.data, loading: prev.data === null, error: null }));
     void api
       .get<unknown>(path, { signal: controller.signal })
       .then((response) => {
-        if (!controller.signal.aborted)
-          setState({ data: normalize(response.data), loading: false, error: null });
+        if (controller.signal.aborted) return;
+        if (options?.cache) resourceCache.set(path, response.data);
+        setState({ data: normalize(response.data), loading: false, error: null });
       })
       .catch((error: unknown) => {
-        if (!controller.signal.aborted)
-          setState({ data: null, loading: false, error: errorMessage(error) });
+        if (controller.signal.aborted) return;
+        setState((prev) =>
+          prev.data === null
+            ? { data: null, loading: false, error: errorMessage(error) }
+            : { ...prev, loading: false },
+        );
       });
     return () => controller.abort();
-  }, [path, revision, normalize]);
+  }, [path, revision, normalize, options?.cache]);
   return { ...state, reload };
 }
 export type ModelRule = {

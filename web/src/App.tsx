@@ -7,15 +7,17 @@ import { Models } from "./pages/Models";
 import { Credentials } from "./pages/Credentials";
 import { Logs } from "./pages/Logs";
 import { Settings } from "./pages/Settings";
+import { Storage } from "./pages/Storage";
 import { Appearance } from "./appearance";
 import s from "./ui.module.scss";
-import { LanguageProvider, LanguageToggle, useT } from "./i18n";
+import { LanguageProvider, useT } from "./i18n";
 
 const navigation = [
   ["", "nav.overview", "grid"],
   ["/models", "nav.models", "model"],
   ["/credentials", "nav.credentials", "key"],
   ["/logs", "nav.logs", "logs"],
+  ["/storage", "nav.storage", "database"],
   ["/settings", "nav.settings", "settings"],
 ];
 export function Guard() {
@@ -77,7 +79,6 @@ function Shell() {
               CodeBuddy<small>{t("app.brandSubtitle")}</small>
             </span>
           </NavLink>
-          <LanguageToggle />
           <button
             className={s.sidebarToggle}
             onClick={toggleSidebar}
@@ -162,7 +163,6 @@ function Login() {
   return (
     <div className={s.login}>
       <div className={s.loginAppearance}>
-        <LanguageToggle />
         <Appearance />
       </div>
       <section className={s.loginIntro}>
@@ -225,6 +225,7 @@ export function AppRoutes() {
           <Route path="credentials" element={<Credentials />} />
           <Route path="logs" element={<Logs />} />
           <Route path="settings" element={<Settings />} />
+          <Route path="storage" element={<Storage />} />
         </Route>
       </Route>
       <Route path="*" element={<Navigate to="/dashboard" replace />} />

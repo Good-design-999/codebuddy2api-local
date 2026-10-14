@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { OAuth } from "../OAuth";
 import { Trial } from "../Trial";
 import { TravelSummary } from "../Travel";
@@ -114,6 +114,39 @@ function ImportDrawer({ onClose, onDone }: { onClose: () => void; onDone: () => 
     </Drawer>
   );
 }
+
+function MoreMenu({ children }: { children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  return (
+    <div className={s.moreMenu} ref={ref}>
+      <button aria-expanded={open} aria-haspopup="menu" onClick={() => setOpen(!open)}>
+        更多
+      </button>
+      {open && (
+        <div className={s.moreMenuList} role="menu" onClick={() => setOpen(false)}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Credentials() {
   const resource = useResource("/credentials", credentialResponse);
   const [selected, setSelected] = useState<string[]>([]);
@@ -535,64 +568,66 @@ export function Credentials() {
                             </button>
                             <button
                               disabled={busy || c.enabled !== true}
-                              aria-label={`签到 ${c.name ?? c.id}`}
-                              onClick={() => maintain("checkin", c)}
-                            >
-                              {c.auto_travel === true ? "签到并旅行" : "签到"}
-                            </button>
-                            <button
-                              disabled={busy || c.enabled !== true}
                               aria-label={`同步余额 ${c.name ?? c.id}`}
                               onClick={() => maintain("sync", c)}
                             >
                               同步余额
                             </button>
-                            {/* Not gated on displayed cooldowns or on enablement: a reset that failed
+                            <MoreMenu>
+                              <button
+                                disabled={busy || c.enabled !== true}
+                                aria-label={`签到 ${c.name ?? c.id}`}
+                                onClick={() => maintain("checkin", c)}
+                              >
+                                {c.auto_travel === true ? "签到并旅行" : "签到"}
+                              </button>
+                              {/* Not gated on displayed cooldowns or on enablement: a reset that failed
                                 to persist must stay retryable, and a disabled account can still hold
                                 a stale cooldown worth clearing. */}
-                            <button
-                              disabled={busy}
-                              aria-label={`清除冷却 ${c.name ?? c.id}`}
-                              onClick={() => maintain("reset-cooldown", c)}
-                            >
-                              清除冷却
-                            </button>
-                            {c.trial_supported === true && (
                               <button
-                                disabled={busy || c.enabled !== true}
-                                aria-label={`领取体验积分 ${c.name ?? c.id}`}
-                                onClick={() => setTrialTarget(c)}
+                                disabled={busy}
+                                aria-label={`清除冷却 ${c.name ?? c.id}`}
+                                onClick={() => maintain("reset-cooldown", c)}
                               >
-                                领取体验积分
+                                清除冷却
                               </button>
-                            )}
-                            {c.daily_chat_supported === true && (
-                              <button
-                                disabled={busy || c.enabled !== true}
-                                aria-label={`活跃打卡 ${c.name ?? c.id}`}
-                                onClick={() => maintain("daily-chat", c)}
-                              >
-                                活跃打卡
-                              </button>
-                            )}
-                            {c.travel_supported === true && (
-                              <>
+                              {c.trial_supported === true && (
                                 <button
                                   disabled={busy || c.enabled !== true}
-                                  aria-label={`旅行状态 ${c.name ?? c.id}`}
-                                  onClick={() => maintain("travel-status", c)}
+                                  aria-label={`领取体验积分 ${c.name ?? c.id}`}
+                                  onClick={() => setTrialTarget(c)}
                                 >
-                                  旅行状态
+                                  领取体验积分
                                 </button>
+                              )}
+                              {c.daily_chat_supported === true && (
                                 <button
                                   disabled={busy || c.enabled !== true}
-                                  aria-label={`旅行领派 ${c.name ?? c.id}`}
-                                  onClick={() => maintain("travel", c)}
+                                  aria-label={`活跃打卡 ${c.name ?? c.id}`}
+                                  onClick={() => maintain("daily-chat", c)}
                                 >
-                                  旅行领派
+                                  活跃打卡
                                 </button>
-                              </>
-                            )}
+                              )}
+                              {c.travel_supported === true && (
+                                <>
+                                  <button
+                                    disabled={busy || c.enabled !== true}
+                                    aria-label={`旅行状态 ${c.name ?? c.id}`}
+                                    onClick={() => maintain("travel-status", c)}
+                                  >
+                                    旅行状态
+                                  </button>
+                                  <button
+                                    disabled={busy || c.enabled !== true}
+                                    aria-label={`旅行领派 ${c.name ?? c.id}`}
+                                    onClick={() => maintain("travel", c)}
+                                  >
+                                    旅行领派
+                                  </button>
+                                </>
+                              )}
+                            </MoreMenu>
                             <button
                               disabled={busy || typeof c.enabled !== "boolean"}
                               onClick={() =>

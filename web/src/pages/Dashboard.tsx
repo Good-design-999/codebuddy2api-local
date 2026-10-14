@@ -114,13 +114,6 @@ function OfficialCredits({ value }: { value: unknown }) {
     </div>
   );
 }
-function bytes(value: unknown) {
-  const n = number(value);
-  if (n === null) return t("dash.storage.unknown");
-  if (n < 1024) return `${metric(n)} B`;
-  if (n < 1048576) return `${(n / 1024).toFixed(1)} KiB`;
-  return `${(n / 1048576).toFixed(1)} MiB`;
-}
 import { KpiCards, UsageTrend } from "../UsageOverview";
 import { t, useT } from "../i18n";
 export { Trend } from "../Trend";
@@ -174,19 +167,19 @@ export function Dashboard() {
             </div>
           )}
           <KpiCards summary={d.summary} previous={d.previous} series={d.series} />
+          <Panel title={t("dash.usageTrend")} hint={t("dash.usageTrendHint")} className={s.trend}>
+            {period.partial === true && (
+              <p className={s.note} role="status">
+                {t("dash.storagePartial")}
+              </p>
+            )}
+            <UsageTrend
+              rows={d.series}
+              granularity={actualGrain}
+              partial={period.partial === true}
+            />
+          </Panel>
           <div className={s.dashboardGrid}>
-            <Panel title={t("dash.usageTrend")} hint={t("dash.usageTrendHint")} className={s.trend}>
-              {period.partial === true && (
-                <p className={s.note} role="status">
-                  {t("dash.storagePartial")}
-                </p>
-              )}
-              <UsageTrend
-                rows={d.series}
-                granularity={actualGrain}
-                partial={period.partial === true}
-              />
-            </Panel>
             <Panel title={t("dash.profileUsage")} hint={t("dash.granularityByRequests")}>
               {d.profiles.length ? (
                 <div className={s.distribution}>
@@ -248,49 +241,6 @@ export function Dashboard() {
             </Panel>
             <Panel title={t("dash.credentialHealth")}>
               <Health data={d.health} />
-            </Panel>
-            <Panel title={t("dash.storage")}>
-              <div className={s.storageOverview}>
-                <Badge
-                  tone={
-                    d.storage.degraded === true
-                      ? "bad"
-                      : d.storage.degraded === false
-                        ? "good"
-                        : "neutral"
-                  }
-                >
-                  {d.storage.degraded === true
-                    ? t("dash.storage.collectDegraded")
-                    : d.storage.degraded === false
-                      ? t("dash.status.normal")
-                      : t("dash.status.unknown")}
-                </Badge>
-                <span>
-                  {t("dash.storage.detailsLine", {
-                    used: bytes(d.storage.logical_bytes),
-                    max: bytes(d.storage.max_bytes),
-                  })}
-                </span>
-              </div>
-              <Fields
-                data={{
-                  数据库文件: bytes(d.storage.db_bytes),
-                  "WAL 文件": bytes(d.storage.wal_bytes),
-                  "SHM 文件": bytes(d.storage.shm_bytes),
-                  保留天数: metric(d.storage.retention_days),
-                  清理状态:
-                    d.storage.pending_cleanup === true
-                      ? t("dash.status.batch")
-                      : d.storage.pending_cleanup === false
-                        ? t("dash.status.done")
-                        : t("dash.storage.unknown"),
-                }}
-              />
-              <details className={s.chartData}>
-                <summary>{t("dash.storageDiagnose")}</summary>
-                <Fields data={d.storage} />
-              </details>
             </Panel>
             <Panel title={t("dash.balanceTitle")}>
               <p className={s.note}>{t("dash.balanceNote")}</p>

@@ -172,9 +172,9 @@ describe("overview cards and usage trend", () => {
     expect(screen.getByText("缓存命中率 75.0%")).toBeTruthy();
     expect(screen.getByText(/^推理 Token/)).toBeTruthy();
     const chart = screen.getByRole("img", { name: "按日用量趋势" });
-    expect(chart.querySelectorAll("polyline")).toHaveLength(3);
+    expect(chart.querySelectorAll("path[data-series]")).toHaveLength(3);
     fireEvent.focus(chart);
-    expect(await screen.findByRole("tooltip")).toBeTruthy();
+    expect(await screen.findByRole("tooltip", { name: /2026-09-14/ })).toBeTruthy();
     expect(screen.getByText("2026-09-14 · UTC")).toBeTruthy();
   });
 });

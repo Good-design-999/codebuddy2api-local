@@ -263,27 +263,6 @@ function SettingsForm({
         </button>
       </div>
       <ErrorNotice message={error} />
-      <Panel title="日志存储">
-        <Badge
-          tone={
-            data.audit.degraded === true
-              ? "bad"
-              : data.audit.degraded === false
-                ? "good"
-                : "neutral"
-          }
-        >
-          {data.audit.degraded === true
-            ? "存储异常"
-            : data.audit.degraded === false
-              ? "正常"
-              : "状态未知"}
-        </Badge>
-        <details className={s.chartData}>
-          <summary>查看存储详情</summary>
-          <Fields data={data.audit} />
-        </details>
-      </Panel>
       {data.session.degraded === true && (
         <Panel title="会话存储">
           <Badge tone="bad">撤销未生效</Badge>

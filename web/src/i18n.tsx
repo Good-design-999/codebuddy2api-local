@@ -1,5 +1,4 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import s from "./ui.module.scss";
 
 export type Lang = "zh" | "en";
 
@@ -17,11 +16,13 @@ const zh: Record<string, string> = {
   "app.signOut": "退出登录",
   "app.verifying": "正在验证登录状态…",
   "app.backToSignIn": "返回登录",
-  "app.language": "切换语言 / Switch language",
+  "appearance.language": "语言",
+  "appearance.lang.system": "跟随系统",
   "nav.overview": "概览",
   "nav.models": "模型路由",
   "nav.credentials": "凭证管理",
   "nav.logs": "日志审计",
+  "nav.storage": "存储管理",
   "nav.settings": "系统设置",
   "login.subtitle": "网关管理",
   "login.title": "登录管理控制台",
@@ -175,6 +176,8 @@ const zh: Record<string, string> = {
   "dash.usageTrend.daily": "按日用量趋势",
   "dash.usageTrend.hourly": "按小时用量趋势",
   "dash.trendData": "查看趋势数据表",
+  "dash.zoomReset": "复位缩放",
+  "dash.zoomHint": "滚轮缩放 · 双击复位",
   "dash.unlimited": "无限",
   "dash.storage.unknown": "未知",
   "dash.storage.collectDegraded": "采集降级",
@@ -248,11 +251,13 @@ const en: Record<string, string> = {
   "app.signOut": "Sign out",
   "app.verifying": "Verifying session…",
   "app.backToSignIn": "Back to sign-in",
-  "app.language": "切换语言 / Switch language",
+  "appearance.language": "Language",
+  "appearance.lang.system": "Follow system",
   "nav.overview": "Overview",
   "nav.models": "Model routing",
   "nav.credentials": "Credentials",
   "nav.logs": "Audit logs",
+  "nav.storage": "Storage",
   "nav.settings": "Settings",
   "login.subtitle": "Gateway management",
   "login.title": "Sign in to the console",
@@ -407,6 +412,8 @@ const en: Record<string, string> = {
   "dash.usageTrend.daily": "Daily usage trend",
   "dash.usageTrend.hourly": "Hourly usage trend",
   "dash.trendData": "View trend data table",
+  "dash.zoomReset": "Reset zoom",
+  "dash.zoomHint": "Scroll to zoom · double-click reset",
   "dash.unlimited": "Unlimited",
   "dash.storage.unknown": "Unknown",
   "dash.storage.collectDegraded": "Collection degraded",
@@ -473,6 +480,37 @@ const messages: Record<Lang, Record<string, string>> = { zh, en };
 const STORAGE_KEY = "codebuddy2api.lang";
 const LANG_EVENT = "codebuddy.lang";
 
+export type LangPref = "system" | Lang;
+
+function systemLang(): Lang {
+  try {
+    return navigator.language?.toLowerCase().startsWith("zh") ? "zh" : "en";
+  } catch {
+    return "zh";
+  }
+}
+function savedPref(): LangPref {
+  try {
+    const value = localStorage.getItem(STORAGE_KEY);
+    return value === "zh" || value === "en" ? value : "system";
+  } catch {
+    return "system";
+  }
+}
+let currentPref: LangPref = "system";
+export function languagePreference(): LangPref {
+  return currentPref;
+}
+export function chooseLanguage(pref: LangPref) {
+  currentPref = pref;
+  try {
+    localStorage.setItem(STORAGE_KEY, pref);
+  } catch {
+    /* ignore */
+  }
+  window.dispatchEvent(new CustomEvent(LANG_EVENT, { detail: pref }));
+}
+
 let currentLang: Lang = "zh";
 const LangContext = createContext<Lang>("zh");
 
@@ -498,47 +536,28 @@ export function useT() {
 }
 
 export function LanguageProvider({ children }: { children: ReactNode }) {
-  const [lang, setLang] = useState<Lang>(() => {
-    try {
-      return localStorage.getItem(STORAGE_KEY) === "en" ? "en" : "zh";
-    } catch {
-      return "zh";
-    }
+  const [pref, setPref] = useState<LangPref>(() => {
+    currentPref = savedPref();
+    return currentPref;
   });
+  const [system, setSystem] = useState<Lang>(systemLang);
+  const lang = pref === "system" ? system : pref;
   currentLang = lang;
   useEffect(() => {
-    // 只更新文档语言；localStorage 仅在用户主动切换时写入，
-    // 保证未操作的访客在站点上不留下任何存储痕迹。
     document.documentElement.lang = lang === "en" ? "en" : "zh-CN";
   }, [lang]);
   useEffect(() => {
     const apply = (event: Event) => {
       const detail = (event as CustomEvent<string>).detail;
-      if (detail === "zh" || detail === "en") setLang(detail);
+      if (detail === "zh" || detail === "en" || detail === "system") setPref(detail);
     };
     window.addEventListener(LANG_EVENT, apply);
     return () => window.removeEventListener(LANG_EVENT, apply);
   }, []);
+  useEffect(() => {
+    const sync = () => setSystem(systemLang());
+    window.addEventListener("languagechange", sync);
+    return () => window.removeEventListener("languagechange", sync);
+  }, []);
   return <LangContext.Provider value={lang}>{children}</LangContext.Provider>;
-}
-
-export function LanguageToggle() {
-  return (
-    <button
-      className={s.sidebarToggle}
-      onClick={() => {
-        const next = currentLang === "zh" ? "en" : "zh";
-        try {
-          localStorage.setItem(STORAGE_KEY, next);
-        } catch {
-          /* ignore */
-        }
-        window.dispatchEvent(new CustomEvent(LANG_EVENT, { detail: next }));
-      }}
-      aria-label={translate("app.language")}
-      title={translate("app.language")}
-    >
-      {currentLang === "zh" ? "EN" : "中"}
-    </button>
-  );
 }

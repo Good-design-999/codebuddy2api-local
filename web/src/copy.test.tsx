@@ -104,7 +104,6 @@ describe("concise user-facing copy", () => {
     expect(container.textContent).not.toMatch(
       /revision|schema|WebUI 不写入|服务端校验为准|内部常量/,
     );
-    expect(screen.getByText("查看存储详情").closest("details")?.open).toBe(false);
   });
 
   it("surfaces a session store that could not persist a revocation", () => {
@@ -156,7 +155,7 @@ describe("concise user-facing copy", () => {
     expect(screen.getByText("人工停用")).toBeTruthy();
     expect(screen.getByText("1 个模型冷却")).toBeTruthy();
     expect(screen.getAllByText("—").length).toBeGreaterThan(0);
-    expect(screen.getByText("Credit 消耗").closest("section")?.textContent).toContain("0");
+    expect(screen.getAllByText("Credit 消耗")[0].closest("section")?.textContent).toContain("0");
     expect(container.textContent).not.toMatch(
       /一个客户端请求只统计一次|未知用量不计为零|人工状态与熔断独立|未导入的旧文本日志/,
     );

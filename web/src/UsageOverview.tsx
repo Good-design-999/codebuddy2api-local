@@ -1,5 +1,5 @@
-import { useId, useState, type PointerEvent } from "react";
-import { metric, number, text, type RecordValue } from "./api";
+import { useEffect, useId, useRef, useState, type PointerEvent } from "react";
+import { compact, metric, number, text, type RecordValue } from "./api";
 import { Empty, Icon } from "./components";
 import { useT } from "./i18n";
 import s from "./ui.module.scss";
@@ -15,19 +15,59 @@ function share(part: number | null, total: number | null): string | null {
   return `${((part / total) * 100).toFixed(1)}%`;
 }
 
+function smoothPath(pts: [number, number][]): string {
+  if (pts.length < 2) return pts.length ? `M${pts[0][0]},${pts[0][1]}` : "";
+  // Fritsch–Carlson tangents keep the curve monotone between points: no
+  // overshoot dips below zero or fake peaks between sparse buckets.
+  const n = pts.length;
+  const slopes: number[] = [];
+  for (let i = 0; i < n - 1; i++) {
+    const dx = pts[i + 1][0] - pts[i][0];
+    slopes.push(dx === 0 ? 0 : (pts[i + 1][1] - pts[i][1]) / dx);
+  }
+  const tangents: number[] = [slopes[0]];
+  for (let i = 1; i < n - 1; i++)
+    tangents.push(slopes[i - 1] * slopes[i] <= 0 ? 0 : (slopes[i - 1] + slopes[i]) / 2);
+  tangents.push(slopes[n - 2]);
+  for (let i = 0; i < n - 1; i++) {
+    if (slopes[i] === 0) {
+      tangents[i] = 0;
+      tangents[i + 1] = 0;
+    } else {
+      const a = tangents[i] / slopes[i];
+      const b = tangents[i + 1] / slopes[i];
+      const h = Math.hypot(a, b);
+      if (h > 3) {
+        const r = 3 / h;
+        tangents[i] = r * a * slopes[i];
+        tangents[i + 1] = r * b * slopes[i];
+      }
+    }
+  }
+  let d = `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
+  for (let i = 0; i < n - 1; i++) {
+    const dx = pts[i + 1][0] - pts[i][0];
+    const c1x = pts[i][0] + dx / 3;
+    const c1y = pts[i][1] + (tangents[i] * dx) / 3;
+    const c2x = pts[i + 1][0] - dx / 3;
+    const c2y = pts[i + 1][1] - (tangents[i + 1] * dx) / 3;
+    d += `C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${pts[i + 1][0].toFixed(1)},${pts[i + 1][1].toFixed(1)}`;
+  }
+  return d;
+}
+
 function Spark({ values, color }: { values: (number | null)[]; color: string }) {
   const nums = values.map((value) => value ?? 0);
   if (nums.length < 2) return null;
   const max = Math.max(1, ...nums);
-  const points = nums
-    .map(
-      (v, i) => `${((i * 100) / (nums.length - 1)).toFixed(1)},${(26 - (v / max) * 22).toFixed(1)}`,
-    )
-    .join(" ");
+  const pts = nums.map((v, i): [number, number] => [
+    (i * 100) / (nums.length - 1),
+    26 - (v / max) * 22,
+  ]);
   return (
     <svg className={s.spark} viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
-      <polyline
-        points={points}
+      <path
+        d={smoothPath(pts)}
         fill="none"
         stroke={color}
         strokeWidth="2"
@@ -35,6 +75,28 @@ function Spark({ values, color }: { values: (number | null)[]; color: string }) 
         strokeLinejoin="round"
       />
     </svg>
+  );
+}
+
+function KpiValue({
+  label,
+  display,
+  exact,
+}: {
+  label: string;
+  display: string;
+  exact: string | null;
+}) {
+  return (
+    <strong className={s.kpiValue} tabIndex={exact === null ? undefined : 0}>
+      {display}
+      {exact !== null && (
+        <span className={s.kpiTip} role="tooltip">
+          <b>{label}</b>
+          {exact}
+        </span>
+      )}
+    </strong>
   );
 }
 
@@ -67,11 +129,12 @@ export function KpiCards({
     const requests = number(row.requests);
     return requests ? (number(row.success) ?? 0) / requests : null;
   });
-  const cards: [string, string, string, string, (number | null)[], string][] = [
+  const cards: [string, string, string, string | null, string, (number | null)[], string][] = [
     [
       t("dash.kpi.requests"),
       "arrow",
-      metric(summary.requests),
+      compact(summary.requests),
+      metric(number(summary.requests)),
       t("dash.vsPrevious", {
         pct: delta(number(summary.requests), number(previous?.requests)) ?? "—",
       }),
@@ -82,16 +145,16 @@ export function KpiCards({
       t("dash.kpi.successRate"),
       "shield",
       rate === null ? "—" : `${(rate * 100).toFixed(1)}%`,
-      t("dash.p95Latency", {
-        value: p95 === null ? "—" : `${(p95 / 1000).toFixed(1)}s`,
-      }),
+      rate === null ? null : `${(rate * 100).toFixed(2)}%`,
+      t("dash.p95Latency", { value: p95 === null ? "—" : `${(p95 / 1000).toFixed(1)}s` }),
       rateSpark,
       "var(--series-tokens)",
     ],
     [
       t("dash.kpi.failures"),
       "alert",
-      metric(summary.error),
+      compact(summary.error),
+      metric(number(summary.error)),
       t("dash.errorBuckets", { n: errorBuckets }),
       sparkOf("error"),
       "var(--error)",
@@ -99,7 +162,8 @@ export function KpiCards({
     [
       t("dash.kpi.credit"),
       "leaf",
-      metric(summary.credit),
+      compact(summary.credit),
+      metric(number(summary.credit)),
       t("dash.vsPrevious", { pct: delta(number(summary.credit), number(previous?.credit)) ?? "—" }),
       sparkOf("credit"),
       "var(--series-credit)",
@@ -107,6 +171,7 @@ export function KpiCards({
     [
       t("dash.kpi.totalTokens"),
       "model",
+      compact(total),
       metric(total),
       t("dash.reasoningSub", { value: metric(summary.reasoning_tokens) }),
       sparkOf("total_tokens"),
@@ -115,6 +180,7 @@ export function KpiCards({
     [
       t("dash.kpi.inputTokens"),
       "down",
+      compact(input),
       metric(input),
       t("dash.shareOf", { pct: share(input, total) ?? "—" }),
       sparkOf("input_tokens"),
@@ -123,7 +189,8 @@ export function KpiCards({
     [
       t("dash.kpi.outputTokens"),
       "up",
-      metric(summary.output_tokens),
+      compact(summary.output_tokens),
+      metric(number(summary.output_tokens)),
       t("dash.shareOf", { pct: share(number(summary.output_tokens), total) ?? "—" }),
       sparkOf("output_tokens"),
       "var(--series-tokens)",
@@ -131,6 +198,7 @@ export function KpiCards({
     [
       t("dash.kpi.cacheTokens"),
       "cache",
+      compact(cacheTotal),
       metric(cacheTotal),
       t("dash.cacheHitRate", { pct: share(cacheRead, input) ?? "—" }),
       cacheSpark,
@@ -139,7 +207,7 @@ export function KpiCards({
   ];
   return (
     <div className={s.kpiGrid}>
-      {cards.map(([label, icon, value, sub, spark, color]) => (
+      {cards.map(([label, icon, value, exactText, sub, spark, color]) => (
         <section className={s.kpiCard} key={label}>
           <div>
             <span>{label}</span>
@@ -147,7 +215,7 @@ export function KpiCards({
               <Icon name={icon} />
             </span>
           </div>
-          <strong>{value}</strong>
+          <KpiValue label={label} display={value} exact={exactText} />
           <small>{sub}</small>
           <Spark values={spark} color={color} />
         </section>
@@ -162,6 +230,12 @@ const TREND_SERIES = [
   { key: "credit", labelKey: "dash.kpi.credit", color: "var(--series-credit)" },
 ] as const;
 
+const LEFT = 56,
+  RIGHT_PAD = 140,
+  TOP = 14,
+  BOTTOM = 172,
+  CHART_HEIGHT = 210;
+
 export function UsageTrend({
   rows,
   granularity = "day",
@@ -173,43 +247,95 @@ export function UsageTrend({
 }) {
   const t = useT();
   const id = useId();
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  // ViewBox matches the rendered pixel width, so SVG text/lines keep their
+  // designed size and tooltip percentages line up with the cursor.
+  const [width, setWidth] = useState(780);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) =>
+      setWidth(Math.max(320, Math.round(entries[0].contentRect.width))),
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  const RIGHT = Math.max(LEFT + 60, width - RIGHT_PAD);
   const [selection, setSelection] = useState<{ rows: RecordValue[]; index: number } | null>(null);
+  const [zoom, setZoom] = useState<{ rows: RecordValue[]; domain: [number, number] } | null>(null);
   const active = selection?.rows === rows ? selection.index : null;
+  const domain = zoom?.rows === rows ? zoom.domain : null;
+  const setDomain = (d: [number, number] | null) => setZoom(d ? { rows, domain: d } : null);
+
+  const bucketsValid =
+    rows.length > 2 &&
+    number(rows[0].bucket) !== null &&
+    (number(rows.at(-1)?.bucket) ?? 0) > (number(rows[0].bucket) ?? 0);
+  const fullStart = bucketsValid ? Number(rows[0].bucket) : 0;
+  const fullEnd = bucketsValid ? Number(rows.at(-1)?.bucket) : rows.length - 1;
+  const step = granularity === "hour" ? 3600 : 86400;
+
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el || !bucketsValid) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      if (!rect.width) return;
+      const frac = Math.min(
+        1,
+        Math.max(0, ((e.clientX - rect.left) * 780) / rect.width - LEFT) / (RIGHT - LEFT),
+      );
+      setZoom((prev) => {
+        const current = prev?.rows === rows ? prev.domain : null;
+        const [ds, de] = current ?? [fullStart, fullEnd];
+        const span = de - ds;
+        const fullSpan = fullEnd - fullStart;
+        const next = Math.min(fullSpan, Math.max(step * 4, span * (e.deltaY < 0 ? 0.75 : 1.3)));
+        if (next >= fullSpan) return null;
+        const anchor = ds + frac * span;
+        let start = anchor - frac * next;
+        start = Math.min(fullEnd - next, Math.max(fullStart, start));
+        return { rows, domain: [start, start + next] };
+      });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  });
+
   if (!rows.length)
     return <Empty title={partial ? t("trend.partialRange") : t("trend.emptyRange")} />;
-  const LEFT = 56,
-    RIGHT = 648,
-    TOP = 14,
-    BOTTOM = 172;
-  const maxOf = (key: string) => Math.max(1, ...rows.map((r) => number(r[key]) ?? 0));
+
+  const [ds, de] = domain ?? [fullStart, fullEnd];
+  const visible = rows.filter((r) => {
+    const b = number(r.bucket);
+    return b === null || (b >= ds - step / 2 && b <= de + step / 2);
+  });
+  const maxOf = (key: string) => Math.max(1, ...visible.map((r) => number(r[key]) ?? 0));
   const maxima: Record<string, number> = Object.fromEntries(
     TREND_SERIES.map(({ key }) => [key, maxOf(key)]),
   );
-  const first = number(rows[0].bucket),
-    last = number(rows.at(-1)?.bucket);
-  const xAt = (index: number) =>
-    rows.length === 1
-      ? (LEFT + RIGHT) / 2
-      : first !== null && last !== null && last > first && number(rows[index].bucket) !== null
-        ? LEFT + ((Number(rows[index].bucket) - first) * (RIGHT - LEFT)) / (last - first)
-        : LEFT + (index * (RIGHT - LEFT)) / (rows.length - 1);
+  const xAt = (index: number) => {
+    if (rows.length === 1) return (LEFT + RIGHT) / 2;
+    const b = number(rows[index].bucket);
+    if (bucketsValid && b !== null) return LEFT + ((b - ds) * (RIGHT - LEFT)) / (de - ds);
+    return LEFT + (index * (RIGHT - LEFT)) / (rows.length - 1);
+  };
   const yAt = (key: string, index: number) =>
     BOTTOM - ((number(rows[index][key]) ?? 0) / (maxima[key] ?? 1)) * (BOTTOM - TOP);
-  const pointsOf = (key: string) => rows.map((_, i) => `${xAt(i)},${yAt(key, i)}`).join(" ");
+  const pathOf = (key: string) =>
+    smoothPath(rows.map((_, i): [number, number] => [xAt(i), yAt(key, i)]));
   const choose = (index: number) =>
     setSelection({ rows, index: Math.max(0, Math.min(rows.length - 1, index)) });
   const pointer = (event: PointerEvent<SVGSVGElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     if (!rect.width) return;
-    const x = ((event.clientX - rect.left) * 780) / rect.width;
+    const x = ((event.clientX - rect.left) * width) / rect.width;
     let closest = 0;
     for (let i = 1; i < rows.length; i++)
       if (Math.abs(x - xAt(i)) < Math.abs(x - xAt(closest))) closest = i;
-    const step = granularity === "hour" ? 3600 : 86400;
-    const tolerance =
-      first !== null && last !== null && last > first
-        ? ((RIGHT - LEFT) * step) / (last - first) / 2
-        : 30;
+    const tolerance = bucketsValid ? ((RIGHT - LEFT) * step) / (de - ds) / 2 : 30;
     if (partial && Math.abs(x - xAt(closest)) > tolerance) setSelection(null);
     else choose(closest);
   };
@@ -217,10 +343,10 @@ export function UsageTrend({
   const ticks = [0, 1, 2, 3, 4];
   return (
     <>
-      <div className={s.chartInteractive}>
+      <div className={s.chartInteractive} ref={wrapRef}>
         <svg
-          viewBox="0 0 780 210"
-          preserveAspectRatio="none"
+          ref={svgRef}
+          viewBox={`0 0 ${width} ${CHART_HEIGHT}`}
           className={s.chart}
           role="img"
           tabIndex={0}
@@ -230,6 +356,7 @@ export function UsageTrend({
           aria-describedby={`${id}-hint${selected ? ` ${id}-tooltip` : ""}`}
           onPointerMove={pointer}
           onPointerDown={pointer}
+          onDoubleClick={() => setDomain(null)}
           onPointerLeave={(e) => {
             if (e.pointerType !== "touch") setSelection(null);
           }}
@@ -238,6 +365,7 @@ export function UsageTrend({
           onKeyDown={(e) => {
             if (e.key === "Escape") {
               setSelection(null);
+              setDomain(null);
               return;
             }
             if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
@@ -251,6 +379,9 @@ export function UsageTrend({
             );
           }}
         >
+          <clipPath id={`${id}-clip`}>
+            <rect x={LEFT} y={0} width={RIGHT - LEFT} height={BOTTOM + 6} />
+          </clipPath>
           {ticks.map((i) => {
             const y = BOTTOM - (i * (BOTTOM - TOP)) / 4;
             return (
@@ -264,70 +395,76 @@ export function UsageTrend({
                   strokeDasharray="4 5"
                 />
                 <text x={LEFT - 6} y={y + 3} textAnchor="end" fill="var(--series-requests)">
-                  {metric((maxima.requests * i) / 4)}
+                  {compact(Math.round((maxima.requests * i) / 4))}
                 </text>
                 <text x={RIGHT + 8} y={y + 3} fill="var(--series-credit)">
-                  {metric((maxima.credit * i) / 4)}
+                  {compact((maxima.credit * i) / 4)}
                 </text>
-                <text x={RIGHT + 76} y={y + 3} fill="var(--series-tokens)">
-                  {metric((maxima.total_tokens * i) / 4)}
+                <text x={RIGHT + 72} y={y + 3} fill="var(--series-tokens)">
+                  {compact((maxima.total_tokens * i) / 4)}
                 </text>
               </g>
             );
           })}
-          {rows.length > 1 &&
-            !partial &&
-            TREND_SERIES.map(({ key, color }) => (
-              <polyline
-                key={key}
-                data-series={key}
-                points={pointsOf(key)}
-                stroke={color}
-                strokeWidth="2.5"
-                fill="none"
-                strokeLinejoin="round"
-                strokeLinecap="round"
-              />
-            ))}
-          {rows.length <= 62 &&
-            TREND_SERIES.map(({ key, color }) => (
-              <g key={key} data-series={key}>
-                {rows.map((_, i) => (
-                  <circle key={i} cx={xAt(i)} cy={yAt(key, i)} r="2.5" fill={color} />
-                ))}
-              </g>
-            ))}
-          {active !== null && (
-            <g aria-hidden="true">
-              <line
-                x1={xAt(active)}
-                x2={xAt(active)}
-                y1={TOP + 6}
-                y2={BOTTOM}
-                stroke="var(--accent)"
-                strokeDasharray="3 4"
-              />
-              {TREND_SERIES.map(({ key, color }) => (
-                <circle
+          <g clipPath={`url(#${id}-clip)`}>
+            {rows.length > 1 &&
+              !partial &&
+              TREND_SERIES.map(({ key, color }) => (
+                <path
                   key={key}
-                  cx={xAt(active)}
-                  cy={yAt(key, active)}
-                  r="5.5"
-                  fill="var(--surface)"
+                  data-series={key}
+                  d={pathOf(key)}
                   stroke={color}
-                  strokeWidth="2.5"
+                  strokeWidth="1.75"
+                  fill="none"
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
                 />
               ))}
-            </g>
-          )}
+            {rows.length <= 62 &&
+              TREND_SERIES.map(({ key, color }) => (
+                <g key={key} data-series={key}>
+                  {rows.map((_, i) => (
+                    <circle key={i} cx={xAt(i)} cy={yAt(key, i)} r="2" fill={color} />
+                  ))}
+                </g>
+              ))}
+            {active !== null && (
+              <g aria-hidden="true">
+                <line
+                  x1={xAt(active)}
+                  x2={xAt(active)}
+                  y1={TOP + 6}
+                  y2={BOTTOM}
+                  stroke="var(--accent)"
+                  strokeDasharray="3 4"
+                />
+                {TREND_SERIES.map(({ key, color }) => (
+                  <circle
+                    key={key}
+                    cx={xAt(active)}
+                    cy={yAt(key, active)}
+                    r="5.5"
+                    fill="var(--surface)"
+                    stroke={color}
+                    strokeWidth="2.5"
+                  />
+                ))}
+              </g>
+            )}
+          </g>
         </svg>
         {selected && active !== null && (
           <div
             className={s.chartTooltip}
             id={`${id}-tooltip`}
             role="tooltip"
-            style={{ left: `${Math.min(92, Math.max(4, (xAt(active) / 780) * 100))}%` }}
-            data-edge={xAt(active) < 220 ? "left" : xAt(active) > 560 ? "right" : "center"}
+            style={{
+              left: `${Math.min(96, Math.max(4, (xAt(active) / width) * 100))}%`,
+            }}
+            data-edge={
+              xAt(active) / width < 0.15 ? "left" : xAt(active) / width > 0.85 ? "right" : "center"
+            }
           >
             <strong>{text(selected.date)} · UTC</strong>
             <dl>
@@ -343,6 +480,11 @@ export function UsageTrend({
             </dl>
           </div>
         )}
+        {domain && (
+          <button type="button" className={s.zoomReset} onClick={() => setDomain(null)}>
+            {t("dash.zoomReset")}
+          </button>
+        )}
       </div>
       <div className={s.chartLegend}>
         {TREND_SERIES.map(({ key, labelKey, color }) => (
@@ -351,13 +493,15 @@ export function UsageTrend({
             {t(labelKey)}
           </span>
         ))}
+        {bucketsValid && <span className={s.zoomHint}>{t("dash.zoomHint")}</span>}
       </div>
       <p className={s.srOnly} id={`${id}-hint`}>
-        指向或点按查看时段；键盘左右方向键逐点查看，Home 和 End 跳到首尾，Esc 关闭提示。
+        指向或点按查看时段；滚轮缩放区间，双击或 Esc 复位；键盘左右方向键逐点查看，Home 和 End
+        跳到首尾。
       </p>
       <div className={s.chartAxis}>
-        <span>{text(rows[0].date)}</span>
-        {rows.length > 1 && <span>{text(rows.at(-1)?.date)}</span>}
+        <span>{text(visible[0]?.date ?? rows[0].date)}</span>
+        {rows.length > 1 && <span>{text(visible.at(-1)?.date ?? rows.at(-1)?.date)}</span>}
       </div>
       <details className={s.chartData}>
         <summary>{t("dash.trendData")}</summary>

@@ -17,7 +17,7 @@ export function Icon({ name = "grid" }: { name?: string }) {
     plus: "M12 5v14M5 12h14",
     collapse: "M4 4h16v16H4zM9 4v16m7-12-3 4 3 4",
     expand: "M4 4h16v16H4zM9 4v16m4-12 3 4-3 4",
-    refresh: "M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 3M4 15l2 3a7 7 0 0 0 12-1",
+    refresh: "M23 4v6h-6M1 20v-6h6M3.5 9a9 9 0 0 1 14.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0 0 20.5 15",
     close: "m6 6 12 12M6 18 18 6",
     shield: "m12 2 8 3v6c0 5-8 11-8 11S4 16 4 11V5l8-3Zm-4 9 3 3 5-6",
     leaf: "M20 3C7 2 1 8 5 16s17 4 15-13ZM5 20 16 8",
@@ -31,6 +31,8 @@ export function Icon({ name = "grid" }: { name?: string }) {
     up: "M12 21V9m0 0 4 4m-4-4-4 4M5 3h14",
     cache:
       "M12 3c4.4 0 8 1.3 8 3s-3.6 3-8 3-8-1.3-8-3 3.6-3 8-3Zm8 3v12c0 1.7-3.6 3-8 3s-8-1.3-8-3V6m16 6c0 1.7-3.6 3-8 3s-8-1.3-8-3",
+    database:
+      "M12 8c4.4 0 8-1.3 8-3s-3.6-3-8-3-8 1.3-8 3 3.6 3 8 3Zm-8 2v9c0 1.7 3.6 3 8 3s8-1.3 8-3v-9M4 14.5c0 1.7 3.6 3 8 3s8-1.3 8-3",
   };
   return (
     <svg
@@ -57,10 +59,11 @@ export function PageTitle({
   description?: string;
   actions?: ReactNode;
 }) {
+  // The header breadcrumb already names the page; keep the h1 for screen readers only.
   return (
     <div className={s.pageTitle}>
       <div>
-        <h1>{title}</h1>
+        <h1 className={s.srOnly}>{title}</h1>
         {description && <p>{description}</p>}
       </div>
       <div className={s.actions}>{actions}</div>

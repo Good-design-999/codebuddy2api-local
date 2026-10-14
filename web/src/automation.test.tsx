@@ -1,8 +1,17 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vite-plus/test";
 import { Credentials } from "./pages/Credentials";
 import { api, credentialResponse, useResource } from "./api";
 import { TravelSummary } from "./Travel";
+
+function openRowMenu(credentialName: string) {
+  const row = screen
+    .getAllByText(credentialName)
+    .map((el) => el.closest("tr"))
+    .find((tr) => tr && within(tr).queryByRole("button", { name: "更多" }));
+  if (!row) throw new Error(`row for ${credentialName} not found`);
+  fireEvent.click(within(row).getByRole("button", { name: "更多" }));
+}
 
 vi.mock("./api", async (original) => ({
   ...(await original<typeof import("./api")>()),
@@ -135,6 +144,7 @@ it("keeps manual checkin and travel separate from the automation preference writ
     ["旅行领派 cn.info", "/credentials/cn/travel"],
     ["签到 intl.info", "/credentials/intl/checkin"],
   ]) {
+    openRowMenu(label.split(" ").pop()!);
     await act(async () => fireEvent.click(screen.getByRole("button", { name: label })));
     expect(post).toHaveBeenLastCalledWith(
       path,
@@ -164,6 +174,7 @@ it("shows partial completion when checkin is unavailable but departure succeeded
     },
   });
   render(<Credentials />);
+  openRowMenu("cn.info");
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "签到 cn.info" })));
   expect(screen.getByText("部分完成")).toBeTruthy();
 });
@@ -243,6 +254,7 @@ it("keeps confirmed departure visible when its status read fails", async () => {
     },
   });
   render(<Credentials />);
+  openRowMenu("cn.info");
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "旅行领派 cn.info" })));
   expect(screen.getByText("部分完成")).toBeTruthy();
   expect(screen.getByText("派遣后核验")).toBeTruthy();
@@ -270,6 +282,7 @@ it("shows nested travel diagnostics independently from checkin", async () => {
     },
   });
   render(<Credentials />);
+  openRowMenu("cn.info");
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "签到 cn.info" })));
   expect(screen.getByText("部分完成")).toBeTruthy();
   expect(screen.getByText("地点配置")).toBeTruthy();

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { create } from "zustand";
 import { Drawer, DrawerPresence, Icon } from "./components";
+import { chooseLanguage, languagePreference, useT, type LangPref } from "./i18n";
 import s from "./ui.module.scss";
 import "./theme.scss";
 
@@ -66,6 +67,7 @@ export function chooseAppearance(value: Partial<{ mode: Mode; palette: Palette }
   useAppearance.setState({ ...next, persisted });
 }
 export function Appearance() {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const { mode, palette, dark, persisted } = useAppearance();
   useEffect(initializeAppearance, []);
@@ -135,6 +137,27 @@ export function Appearance() {
                 : "配色只应用于浅色界面，不改变状态颜色。"}
             </p>
             {!persisted && <p role="status">浏览器无法保存偏好，本次会话内仍然生效。</p>}
+            <fieldset className={s.langChoices}>
+              <legend>{t("appearance.language")}</legend>
+              {(
+                [
+                  ["system", t("appearance.lang.system")],
+                  ["zh", "中文"],
+                  ["en", "EN"],
+                ] as [LangPref, string][]
+              ).map(([value, label]) => (
+                <label key={value}>
+                  <input
+                    type="radio"
+                    name="ui-language"
+                    value={value}
+                    checked={languagePreference() === value}
+                    onChange={() => chooseLanguage(value)}
+                  />
+                  <span className={s.langDot}>{label}</span>
+                </label>
+              ))}
+            </fieldset>
           </Drawer>
         )}
       </DrawerPresence>

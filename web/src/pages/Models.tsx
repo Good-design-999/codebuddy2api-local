@@ -493,8 +493,8 @@ function matchesCatalog(model: ModelRule, query: string, filter: CatalogFilter):
   return true;
 }
 export function Models() {
-  const resource = useResource("/models", modelResponse);
-  const credentials = useResource("/credentials", credentialResponse);
+  const resource = useResource("/models", modelResponse, { cache: true });
+  const credentials = useResource("/credentials", credentialResponse, { cache: true });
   const [query, setQuery] = useState("");
   const [detailsId, setDetailsId] = useState<string | null>(null);
   const detailed = resource.data?.models.find((model) => model.id === detailsId);

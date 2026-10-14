@@ -28,7 +28,9 @@ function bytes(value: unknown): string {
 
 function ArchivePanel({ reload }: { reload: () => void }) {
   const t = useT();
-  const [days, setDays] = useState(30);
+  // Default shorter than the 30-day retention window so opening the page (which
+  // prunes expired rows) still leaves older in-retention logs to archive.
+  const [days, setDays] = useState(7);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
@@ -154,7 +156,7 @@ export function Storage() {
 docker compose down        ${t("storage.step.stopLocal")}
 
 ${t("storage.step.vacuum")}
-sqlite3 auth/logs.sqlite3 "PRAGMA wal_checkpoint(TRUNCATE); VACUUM;"
+sqlite3 ${typeof d.db_path === "string" && d.db_path ? d.db_path : "auth/logs.sqlite3"} "PRAGMA wal_checkpoint(TRUNCATE); VACUUM;"
 
 ${t("storage.step.restart")}
 docker compose up -d`}

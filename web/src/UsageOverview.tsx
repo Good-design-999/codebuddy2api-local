@@ -241,11 +241,13 @@ const LEFT = 40,
 export function UsageTrend({
   rows,
   hourlyRows,
+  hourlyPartial = false,
   granularity = "day",
   partial = false,
 }: {
   rows: RecordValue[];
   hourlyRows?: RecordValue[];
+  hourlyPartial?: boolean;
   granularity?: string;
   partial?: boolean;
 }) {
@@ -321,6 +323,7 @@ export function UsageTrend({
       : 0;
   const displayRows =
     domain && de - ds <= 48 * HOUR_STEP && hourlyInWindow >= 4 ? (hourlyRows ?? rows) : rows;
+  const displayPartial = displayRows === rows ? partial : hourlyPartial;
   const displayStep = displayRows === rows ? step : HOUR_STEP;
   const active = selection?.rows === displayRows ? selection.index : null;
   const visible = displayRows.filter((r) => {
@@ -354,7 +357,7 @@ export function UsageTrend({
     for (let i = 1; i < displayRows.length; i++)
       if (Math.abs(x - xAt(i)) < Math.abs(x - xAt(closest))) closest = i;
     const tolerance = bucketsValid ? ((RIGHT - LEFT) * displayStep) / (de - ds) / 2 : 30;
-    if (partial && Math.abs(x - xAt(closest)) > tolerance) setSelection(null);
+    if (displayPartial && Math.abs(x - xAt(closest)) > tolerance) setSelection(null);
     else choose(closest);
   };
   const selected = active === null ? null : displayRows[active];
@@ -455,7 +458,7 @@ export function UsageTrend({
           })}
           <g clipPath={`url(#${id}-clip)`}>
             {displayRows.length > 1 &&
-              (!partial || displayRows !== rows) &&
+              !displayPartial &&
               TREND_SERIES.map(({ key, color }) => (
                 <path
                   key={key}

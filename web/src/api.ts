@@ -151,13 +151,22 @@ export async function establishSession(apiKey?: string) {
 // Session-level response cache for heavy pages (model routing): reopening the
 // page renders the last snapshot instantly while a fresh fetch replaces it.
 const resourceCache = new Map<string, unknown>();
+useSession.subscribe((state, prev) => {
+  if (state.status !== "authenticated" || state.csrf !== prev.csrf) resourceCache.clear();
+});
 export function useResource<T>(
   path: string,
   normalize: (value: unknown) => T,
   options?: { cache?: boolean },
 ) {
   const cached = options?.cache ? resourceCache.get(path) : undefined;
-  const [state, setState] = useState<{ data: T | null; loading: boolean; error: string | null }>({
+  const [state, setState] = useState<{
+    path: string;
+    data: T | null;
+    loading: boolean;
+    error: string | null;
+  }>({
+    path,
     data: cached === undefined ? null : normalize(cached),
     loading: cached === undefined,
     error: null,
@@ -166,23 +175,44 @@ export function useResource<T>(
   const reload = useCallback(() => setRevision((v) => v + 1), []);
   useEffect(() => {
     const controller = new AbortController();
-    // A cached snapshot stays on screen during the refresh instead of flashing a spinner.
-    setState((prev) => ({ data: prev.data, loading: prev.data === null, error: null }));
+    const cachedForPath = options?.cache ? resourceCache.get(path) : undefined;
+    // Keep same-path data (or a cached snapshot) on screen during refresh;
+    // clear stale data when switching to a different path without a cache hit.
+    setState((prev) => {
+      const data =
+        prev.path === path
+          ? prev.data
+          : cachedForPath === undefined
+            ? null
+            : normalize(cachedForPath);
+      return { path, data, loading: data === null, error: null };
+    });
     void api
       .get<unknown>(path, { signal: controller.signal })
       .then((response) => {
         if (controller.signal.aborted) return;
         if (options?.cache) resourceCache.set(path, response.data);
-        setState({ data: normalize(response.data), loading: false, error: null });
+        setState({ path, data: normalize(response.data), loading: false, error: null });
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
-        // Keep stale data on screen during a failed refresh, but surface the error.
-        setState((prev) => ({ ...prev, loading: false, error: errorMessage(error) }));
+        setState((prev) => ({
+          path,
+          data: prev.path === path ? prev.data : null,
+          loading: false,
+          error: errorMessage(error),
+        }));
       });
     return () => controller.abort();
   }, [path, revision, normalize, options?.cache]);
-  return { ...state, reload };
+  const currentData =
+    state.path === path ? state.data : cached === undefined ? null : normalize(cached);
+  return {
+    data: currentData,
+    loading: state.path === path ? state.loading : cached === undefined,
+    error: state.path === path ? state.error : null,
+    reload,
+  };
 }
 export type ModelRule = {
   id: string;

@@ -33,10 +33,11 @@ describe("storage page", () => {
     expect(screen.getAllByText("2.0 MB").length).toBeGreaterThan(0);
     expect(screen.getByText(/约可回收 2.0 MB/)).toBeTruthy();
     expect(screen.getByText("audit-20260901-000000-abcdef12.jsonl")).toBeTruthy();
+    expect(get).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "归档并删除" }));
-    await waitFor(() => expect(post).toHaveBeenCalledWith("/storage/archive", { days: 30 }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith("/storage/archive", { days: 7 }));
     expect(await screen.findByText(/已归档 6 条/)).toBeTruthy();
-    expect(get).toHaveBeenCalledWith("/storage", expect.objectContaining({}));
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
   });
 });
 
@@ -51,18 +52,23 @@ describe("cached resources", () => {
   }
 
   it("renders the cached snapshot immediately on remount while refreshing", async () => {
-    vi.spyOn(api, "get").mockImplementation(
-      (path: string) =>
-        new Promise((resolve) =>
-          setTimeout(() => resolve({ data: { marker: `fresh-${path}` } }), 5),
-        ),
-    );
+    let call = 0;
+    const get = vi
+      .spyOn(api, "get")
+      .mockImplementation(
+        (path: string) =>
+          new Promise((resolve) =>
+            setTimeout(() => resolve({ data: { marker: `fresh-${path}-${++call}` } }), 5),
+          ),
+      );
     const first = render(<Probe path="/cache-probe" />);
-    expect(await screen.findByText("fresh-/cache-probe")).toBeTruthy();
+    expect(await screen.findByText("fresh-/cache-probe-1")).toBeTruthy();
     first.unmount();
-    // Second mount: cached value shows synchronously instead of the spinner.
+    // Second mount: cached value shows synchronously, then the fresh GET replaces it.
     render(<Probe path="/cache-probe" />);
     expect(screen.queryByText("加载中")).toBeNull();
-    expect(screen.getByText("fresh-/cache-probe")).toBeTruthy();
+    expect(screen.getByText("fresh-/cache-probe-1")).toBeTruthy();
+    expect(await screen.findByText("fresh-/cache-probe-2")).toBeTruthy();
+    expect(get).toHaveBeenCalledTimes(2);
   });
 });

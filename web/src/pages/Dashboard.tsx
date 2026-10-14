@@ -153,7 +153,12 @@ export function Dashboard() {
               <option value="hour">{t("dash.granularityHour")}</option>
               <option value="day">{t("dash.granularityDay")}</option>
             </select>
-            <button onClick={resource.reload}>
+            <button
+              onClick={() => {
+                resource.reload();
+                hourly.reload();
+              }}
+            >
               <Icon name="refresh" />
               {t("dash.refresh")}
             </button>
@@ -178,6 +183,7 @@ export function Dashboard() {
             <UsageTrend
               rows={d.series}
               hourlyRows={hourly.data?.series}
+              hourlyPartial={hourly.data?.range?.partial === true}
               granularity={actualGrain}
               partial={period.partial === true}
             />

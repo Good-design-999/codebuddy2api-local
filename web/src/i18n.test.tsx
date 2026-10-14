@@ -51,12 +51,16 @@ describe("i18n", () => {
     render(
       <LanguageProvider>
         <Appearance />
+        <ProbeText />
       </LanguageProvider>,
     );
+    expect(screen.getByTestId("probe").textContent).toBe("Overview");
     fireEvent.click(screen.getByRole("button", { name: "外观设置" }));
     fireEvent.click(document.querySelector('input[name="ui-language"][value="zh"]')!);
     expect(localStorage.getItem("codebuddy2api.lang")).toBe("zh");
+    expect(screen.getByTestId("probe").textContent).toBe("概览");
     fireEvent.click(document.querySelector('input[name="ui-language"][value="system"]')!);
     expect(localStorage.getItem("codebuddy2api.lang")).toBe("system");
+    expect(screen.getByTestId("probe").textContent).toBe("Overview");
   });
 });

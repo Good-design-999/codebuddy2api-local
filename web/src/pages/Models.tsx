@@ -500,6 +500,7 @@ export function Models() {
   const detailed = resource.data?.models.find((model) => model.id === detailsId);
   const [editing, setEditing] = useState<ModelRule | null>(null);
   const [creating, setCreating] = useState(false);
+  const [editorRevision, setEditorRevision] = useState<number | null>(null);
   const [deleting, setDeleting] = useState<ModelRule | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -529,7 +530,10 @@ export function Models() {
             <button
               className={s.primary}
               disabled={!resource.data}
-              onClick={() => setCreating(true)}
+              onClick={() => {
+                setEditorRevision(resource.data?.revision ?? null);
+                setCreating(true);
+              }}
             >
               <Icon name="plus" />
               新增模型
@@ -698,7 +702,14 @@ export function Models() {
                       <td>
                         <div className={s.rowActions}>
                           <button onClick={() => setDetailsId(m.id)}>模型详情</button>
-                          <button onClick={() => setEditing(m)}>编辑规则</button>
+                          <button
+                            onClick={() => {
+                              setEditorRevision(resource.data?.revision ?? null);
+                              setEditing(m);
+                            }}
+                          >
+                            编辑规则
+                          </button>
                           {m.custom && (
                             <button
                               className={s.textDanger}
@@ -737,10 +748,11 @@ export function Models() {
             creating={creating}
             models={resource.data.models}
             credentials={credentials.data}
-            revision={resource.data.revision}
+            revision={editorRevision ?? resource.data.revision}
             onClose={() => {
               setEditing(null);
               setCreating(false);
+              setEditorRevision(null);
             }}
             onSaved={resource.reload}
           />

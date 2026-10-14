@@ -27,16 +27,18 @@ class ArchiveAndStorageStatsTests(unittest.TestCase):
         self.store.close()
         self.temp.cleanup()
 
-    def record(self, id, started_at):
+    def record(self, id, started_at, duration_ms=100):
         return {"id": id, **self.store.ticket(), "started_at": started_at,
                 "public_model": "m", "upstream_model": "u", "profile": "p",
-                "credential": "c", "protocol": "chat", "status_code": 200, "outcome": "success"}
+                "credential": "c", "protocol": "chat", "status_code": 200,
+                "duration_ms": duration_ms, "outcome": "success"}
 
     def test_archive_exports_then_deletes_and_keeps_recent_rows(self):
         old = time.time() - 10 * 86400
-        self.store.record_request(self.record("old", old))
-        self.store.record_request(self.record("new", time.time()))
+        self.store.record_request(self.record("old", old, duration_ms=200))
+        self.store.record_request(self.record("new", time.time(), duration_ms=100))
         self.store.event("runtime", "rotate", {"note": "old"})
+        self.assertEqual(self.store.dashboard(30)["summary"]["p95_duration_ms"], 200)
         result = self.store.archive(7)
         self.assertTrue(result["ok"])
         self.assertEqual(result["archived_requests"], 1)
@@ -48,8 +50,12 @@ class ArchiveAndStorageStatsTests(unittest.TestCase):
         self.assertEqual(oct(archive.stat().st_mode & 0o777), "0o600")
         self.assertIsNone(self.store.get_request("old"))
         self.assertIsNotNone(self.store.get_request("new"))
-        # Aggregates survive: only raw rows were exported and removed.
-        self.assertTrue(self.store.dashboard(30)["summary"]["requests"] >= 2)
+        # Aggregates survive, replay dedup stays intact, and partial detail samples hide P95.
+        replay = self.store.record_request(self.record("old", old, duration_ms=200))
+        self.assertEqual(replay, {"ok": True, "recorded": False, "reason": "duplicate"})
+        summary = self.store.dashboard(30)["summary"]
+        self.assertEqual(summary["requests"], 2)
+        self.assertIsNone(summary["p95_duration_ms"])
 
     def test_archive_empty_window_is_a_noop_without_a_file(self):
         self.store.record_request(self.record("fresh", time.time()))

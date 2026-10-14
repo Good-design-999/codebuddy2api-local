@@ -116,6 +116,7 @@ class AuditStore:
         self._validate(max_bytes, retention_days, preview_limit)
         self.max_bytes, self.retention_days, self.preview_limit = max_bytes, retention_days, preview_limit
         self._lock = threading.Lock()
+        self._archive_lock = threading.Lock()
         self._health_lock = threading.Lock()
         self.failure_count = self.dropped_records = 0
         self.failure_events: list[float] = []
@@ -564,9 +565,12 @@ class AuditStore:
             durations = sorted(r[0] for r in self._db.execute(
                 "SELECT json_extract(payload,'$.duration_ms') FROM requests WHERE started_at>=? AND started_at<=?",
                 (start, now)).fetchall() if r[0] is not None)
-            # Detail rows are pruned by retention; without them the percentile is unknown.
-            summary["p95_duration_ms"] = (durations[max(0, math.ceil(len(durations) * 0.95) - 1)]
-                                          if durations else None)
+            # Detail rows can be pruned, archived, or cleared independently of daily
+            # aggregates; only report P95 when the detail sample covers the period.
+            summary["p95_duration_ms"] = (
+                durations[max(0, math.ceil(len(durations) * 0.95) - 1)]
+                if durations and len(durations) >= summary["duration_ms_known"]
+                else None)
             return {"summary": summary, "previous": previous, "series": series,
                     "models": [{"model": key, **value} for key, value in models.items()],
                     "profiles": [{"profile": key, **value} for key, value in profiles.items()],
@@ -596,7 +600,8 @@ class AuditStore:
                 self._fault(exc)
                 sizes[key] = None
         recent = self._recent_failures()
-        return {**result, **sizes, "max_bytes": self.max_bytes, "retention_days": self.retention_days,
+        return {**result, **sizes, "db_path": str(self.path), "max_bytes": self.max_bytes,
+                "retention_days": self.retention_days,
                 "preview_limit": self.preview_limit, "schema_version": SCHEMA_VERSION, "epoch": self._epoch,
                 "degraded": bool(recent), "recent_failures": recent, "failure_count": self.failure_count,
                 "dropped_records": self.dropped_records, "last_error": self.last_error,
@@ -626,39 +631,61 @@ class AuditStore:
         if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 3650:
             raise ValueError("invalid archive window")
         cutoff = time.time() - days * 86400
-        # Export-before-delete with a generous deadline: the shared 1s SQL budget
-        # cannot cover large windows, and the lock is held for the whole archive.
-        if not self._lock.acquire(timeout=0.25):
+        if not self._archive_lock.acquire(timeout=0.25):
             self._fault(TimeoutError())
             return {"ok": False}
+        def step(callback, write=False):
+            if not self._lock.acquire(timeout=0.25):
+                raise TimeoutError()
+            try:
+                if self._closed:
+                    raise RuntimeError("closed")
+                deadline = time.monotonic() + 1
+                self._sql_deadline = deadline
+                self._db.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+                if write:
+                    self._db.execute("BEGIN IMMEDIATE")
+                result = callback()
+                if write:
+                    self._db.execute("COMMIT")
+                return result
+            except Exception:
+                if not self._closed:
+                    try:
+                        if self._db.in_transaction:
+                            self._db.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+                raise
+            finally:
+                if not self._closed:
+                    self._db.set_progress_handler(None, 0)
+                self._lock.release()
         target = None
         try:
-            if self._closed:
-                raise RuntimeError("closed")
-            self._sql_deadline = time.monotonic() + 120
-            self._db.set_progress_handler(lambda: int(time.monotonic() > self._sql_deadline), 1000)
-            self._db.execute("BEGIN IMMEDIATE")
-            has_old = (self._db.execute("SELECT 1 FROM requests WHERE started_at<? LIMIT 1", (cutoff,)).fetchone()
-                       or self._db.execute("SELECT 1 FROM events WHERE started_at<? LIMIT 1", (cutoff,)).fetchone())
+            has_old = step(lambda: (
+                self._db.execute("SELECT 1 FROM requests WHERE started_at<? LIMIT 1", (cutoff,)).fetchone()
+                or self._db.execute("SELECT 1 FROM events WHERE started_at<? LIMIT 1", (cutoff,)).fetchone()))
             if not has_old:
-                self._db.execute("COMMIT")
                 return {"ok": True, "archived_requests": 0, "archived_events": 0, "file": None}
             directory = Path(str(self.path)).parent / "archives"
             directory.mkdir(mode=0o700, exist_ok=True)
             name = f"audit-{time.strftime('%Y%m%d-%H%M%S', time.gmtime(cutoff))}-{uuid.uuid4().hex[:8]}.jsonl"
             target = directory / name
             tmp = target.with_suffix(".tmp")
-            exported = {"request": 0, "event": 0}
+            request_ids: list[str] = []
+            event_ids: list[str] = []
             try:
                 with open(tmp, "x", encoding="utf-8") as handle:
-                    # Keyset-paginated batches keep each statement inside the deadline.
+                    # Short per-batch lock holds let live record_request/event calls
+                    # interleave within their 250ms lock budget while file I/O runs unlocked.
                     last = (0.0, "")
                     while True:
-                        rows = self._db.execute(
+                        rows = step(lambda last=last: self._db.execute(
                             "SELECT id,started_at,model,profile,credential,outcome,status_code,payload,client_ip "
                             "FROM requests WHERE started_at<? AND (started_at,id)>(?,?) "
                             "ORDER BY started_at,id LIMIT 2000",
-                            (cutoff, *last)).fetchall()
+                            (cutoff, *last)).fetchall())
                         if not rows:
                             break
                         for row in rows:
@@ -667,14 +694,14 @@ class AuditStore:
                                  "profile": row[3], "credential": row[4], "outcome": row[5],
                                  "status_code": row[6], "payload": json.loads(row[7]), "client_ip": row[8]},
                                 ensure_ascii=False) + "\n")
-                        exported["request"] += len(rows)
+                            request_ids.append(row[0])
                         last = (rows[-1][1], rows[-1][0])
                     last = (0.0, "")
                     while True:
-                        rows = self._db.execute(
+                        rows = step(lambda last=last: self._db.execute(
                             "SELECT id,started_at,kind,action,payload FROM events "
                             "WHERE started_at<? AND (started_at,id)>(?,?) ORDER BY started_at,id LIMIT 2000",
-                            (cutoff, *last)).fetchall()
+                            (cutoff, *last)).fetchall())
                         if not rows:
                             break
                         for row in rows:
@@ -682,36 +709,34 @@ class AuditStore:
                                 {"kind": "event", "id": row[0], "started_at": row[1], "event_kind": row[2],
                                  "action": row[3], "payload": json.loads(row[4])},
                                 ensure_ascii=False) + "\n")
-                        exported["event"] += len(rows)
+                            event_ids.append(row[0])
                         last = (rows[-1][1], rows[-1][0])
+                    handle.flush()
+                    os.fsync(handle.fileno())
                 os.chmod(tmp, 0o600)
                 os.replace(tmp, target)
+                dir_fd = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
             except Exception:
                 try:
                     tmp.unlink()
                 except OSError:
                     pass
                 raise
-            while self._db.execute(
-                    "DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE started_at<? LIMIT 2000)",
-                    (cutoff,)).rowcount:
-                pass
-            while self._db.execute(
-                    "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE started_at<? LIMIT 2000)",
-                    (cutoff,)).rowcount:
-                pass
-            self._db.execute("DELETE FROM ingest WHERE created_at<?", (cutoff,))
-            self._db.execute("COMMIT")
-            return {"ok": True, "archived_requests": exported["request"],
-                    "archived_events": exported["event"], "file": name}
+            # Delete only the exact exported detail rows in short slices; ingest dedup
+            # keys stay until _expire() prunes them at retention_days.
+            for table, ids in (("requests", request_ids), ("events", event_ids)):
+                for i in range(0, len(ids), 500):
+                    chunk = ids[i:i + 500]
+                    marks = ",".join("?" * len(chunk))
+                    step(lambda table=table, marks=marks, chunk=chunk: self._db.execute(
+                        f"DELETE FROM {table} WHERE id IN ({marks})", chunk), write=True)
+            return {"ok": True, "archived_requests": len(request_ids),
+                    "archived_events": len(event_ids), "file": name}
         except Exception as exc:
-            try:
-                if self._db.in_transaction:
-                    self._db.execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
-            # Rollback kept every row in the database, so the exported file is a
-            # duplicate waiting to happen; drop it.
             if target is not None:
                 try:
                     target.unlink()
@@ -720,9 +745,7 @@ class AuditStore:
             self._fault(exc)
             return {"ok": False}
         finally:
-            if not self._closed:
-                self._db.set_progress_handler(None, 0)
-            self._lock.release()
+            self._archive_lock.release()
 
     def configure(self, max_bytes=None, retention_days=None, preview_limit=None):
         values = (self.max_bytes if max_bytes is None else max_bytes,

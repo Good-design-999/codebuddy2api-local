@@ -87,7 +87,11 @@ function OfficialCredits({ value }: { value: unknown }) {
             return (
               <tr key={key}>
                 <td>{typeof row.name === "string" ? row.name : key.split(/[\\/]/).at(-1)}</td>
-                <td>{metric(credits?.credits ?? credits?.remaining)}</td>
+                <td>
+                  {credits?.unlimited && credits?.enterprise
+                    ? t("dash.unlimited")
+                    : metric(credits?.credits ?? credits?.remaining)}
+                </td>
                 <td>
                   {row.error ? (
                     <Badge tone="warn">{t("dash.status.syncError")}</Badge>

@@ -80,7 +80,8 @@ from app.startup import allows_open_noauth, load_startup_env, run_server
 from app.site_routing import (DOMESTIC, INTERNATIONAL, PROFILE_ENDPOINTS, site_for_auth, site_for_headers,
                               profile_for_auth, profile_for_headers, profile_region, profile_product,
                               profile_site, chat_url_for_headers, refresh_url_for_auth)
-from app.client_profiles import CLI_VERSION, CLI_USER_AGENT, credential_headers, catalog_cache_key, account_key
+from app.client_profiles import (CLI_VERSION, CLI_USER_AGENT, credential_headers, catalog_cache_key,
+                                 account_key, enterprise_id_of, is_enterprise_account)
 try:
     from app import credits as credits_mod
 except ImportError:  # Disable credit maintenance when its module is unavailable.
@@ -210,16 +211,49 @@ def _cred_uid(path) -> Optional[str]:
         return None
 
 def _credential_account(data: dict) -> dict:
+    """Return the account block, preferring a populated ``account`` object.
+
+    An empty ``account`` object must not shadow a populated ``accounts[0]``: some
+    exports carry both, and treating ``{}`` as authoritative makes the credential
+    look like it has no uid at all.
+    """
     account = data.get("account")
-    if not isinstance(account, dict):
-        accounts = data.get("accounts") or []
-        account = accounts[0] if isinstance(accounts, list) and accounts and isinstance(accounts[0], dict) else {}
-    return account
+    if isinstance(account, dict) and account:
+        return account
+    accounts = data.get("accounts")
+    candidate = accounts[0] if isinstance(accounts, list) and accounts and isinstance(accounts[0], dict) else None
+    if candidate:
+        return candidate
+    return account if isinstance(account, dict) else {}
+
+
+def _identity_email(account: dict) -> str | None:
+    """Return a real email usable as an identity when no uid exists.
+
+    Display placeholders and values that merely repeat another field must never be
+    used: they would merge unrelated accounts onto a single key.
+    """
+    email = account.get("email")
+    if not isinstance(email, str):
+        return None
+    text = email.strip()
+    if "@" not in text or text.lower() == "unknown" or text in ("手动添加", "未命名账号"):
+        return None
+    if text == str(account.get("nickname") or "").strip():
+        return None
+    if text == str(account.get("uid") or "").strip():
+        return None
+    return text.lower()
 
 
 def _credential_identity(data: dict) -> str:
+    """Hash the stable account identity, falling back to a real email without a uid."""
     account = _credential_account(data)
-    return account_key(profile_for_auth(data.get("auth") or {}), account.get("uid"), account.get("enterpriseId"))
+    uid = account.get("uid")
+    if not (isinstance(uid, str) and uid.strip()):
+        uid = _identity_email(account) or ""
+    return account_key(profile_for_auth(data.get("auth") or {}), uid,
+                       enterprise_id_of(account))
 
 
 def _cred_identity(path) -> str | None:
@@ -933,6 +967,9 @@ class CredentialPool:
         if not balance:
             return False
         try:
+            # An unlimited enterprise tenant holds no numeric balance and is never zero.
+            if balance.get("unlimited") and balance.get("enterprise"):
+                return False
             return (bool(balance.get("intl")) == (profile_region(profile) == "intl")
                     and float(balance.get("credits") or 0) <= 0)
         except (TypeError, ValueError):
@@ -943,6 +980,9 @@ class CredentialPool:
         if not balance:
             return profile_region(profile) == "cn"
         try:
+            # An unlimited enterprise tenant holds no numeric balance; it has credit on its own site.
+            if balance.get("unlimited") and balance.get("enterprise"):
+                return bool(balance.get("intl")) == (profile_region(profile) == "intl")
             return (bool(balance.get("intl")) == (profile_region(profile) == "intl")
                     and float(balance.get("credits") or 0) > 0)
         except (TypeError, ValueError):
@@ -1530,13 +1570,24 @@ def _sync_credits(pool, ledger, entry, *, checkin, failed, expected_identity=Non
                 _sync_error(pool, ledger, entry, generation, "dailychat", error)
         if not model_policy.credential_enabled(CONFIG, entry):
             return None
-        balance = credits_mod.fetch_credits(token, uid=uid, domain=domain)
+        # An enterprise type without a stored tenant id still bills through the
+        # enterprise endpoint, so resolve the id once before dispatching.
+        account = _credential_account(cm._session())
+        enterprise_id = enterprise_id_of(account)
+        if enterprise_id is None and is_enterprise_account(account):
+            enterprise_id = credits_mod.resolve_enterprise_id(token, uid=uid, domain=domain) or ""
+        balance = credits_mod.fetch_credits(
+            token, uid=uid, domain=domain,
+            # Enterprise tenants bill through a different endpoint; the dispatch key
+            # travels from the credential so both views agree.
+            enterprise_id=enterprise_id or "")
         if bool(balance.get("intl")) != (site == INTERNATIONAL):
             raise ValueError("积分响应与凭据站点不一致")
         if not pool.apply_if_current(cm, generation, lambda: ledger.update_credits(cid, balance)):
             failed.add(cid)
             return None
-        _log(f"[credits] {Path(cid).name}: 站点 {site}，余额 {balance['credits']}")
+        shown = "无限" if balance.get("unlimited") and balance.get("enterprise") else balance["credits"]
+        _log(f"[credits] {Path(cid).name}: 站点 {site}，余额 {shown}")
         profile = profile_for_headers(headers)
         return entry, generation, headers, profile
     except Exception as error:
@@ -2374,6 +2425,8 @@ def _billing_totals() -> dict:
             "used_source": "official_usage_detail" if detail else "quota_delta",
             # Expose incomplete pagination or failed account synchronization.
             "partial": bool(agg.get("partial") or cache.get("partial")),
+            # Unlimited enterprise tenants stay outside the monetary conversion.
+            "unlimited_accounts": int(agg.get("unlimited_accounts") or 0),
             "groups": groups_out, "by_day": cache.get("by_day") or {}}
 
 
@@ -2620,9 +2673,16 @@ def _profile_has_credits(profile: str) -> bool:
         if profile_region(profile) == "cn":
             return True
         ledger = CONFIG.get("ledger")
-        return bool(ledger and any((entry.get("credits") or {}).get("intl")
-                                   and float((entry.get("credits") or {}).get("credits") or 0) > 0
-                                   for entry in ledger.snapshot().values()))
+
+        def _positive(entry):
+            c = entry.get("credits") or {}
+            if not c.get("intl"):
+                return False
+            if c.get("unlimited") and c.get("enterprise"):
+                return True  # Unlimited tenants hold no numeric balance.
+            return float(c.get("credits") or 0) > 0
+
+        return bool(ledger and any(_positive(entry) for entry in ledger.snapshot().values()))
     return any(pool._entry_profile(entry) == profile and pool._has_credit(entry, profile)
                for entry in pool.entries() if model_policy.credential_enabled(CONFIG, entry))
 

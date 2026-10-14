@@ -38,12 +38,14 @@ def identity_headers(profile: str) -> dict:
 
 
 def _auth_headers(auth: dict, account: dict) -> dict:
+    # Read the tenant id through the shared helper so header and billing dispatch agree.
+    enterprise_id = enterprise_id_of(account) or ""
     headers = {
         "Content-Type": "application/json", "Accept": "application/json",
         "Authorization": f"Bearer {auth.get('accessToken', '')}",
         "X-User-Id": str(account.get("uid") or ""),
-        "X-Enterprise-Id": str(account.get("enterpriseId") or ""),
-        "X-Tenant-Id": str(account.get("enterpriseId") or ""),
+        "X-Enterprise-Id": enterprise_id,
+        "X-Tenant-Id": enterprise_id,
         "X-Domain": domain_for_auth(auth),
         "X-Product": "SaaS", "X-Requested-With": "XMLHttpRequest",
     }
@@ -71,6 +73,37 @@ def account_key(profile: str, uid, enterprise_id="") -> str:
     identity = json.dumps([profile, str(uid or ""), str(enterprise_id or "")],
                           ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def enterprise_id_of(account) -> str | None:
+    """Read the tenant identifier in either naming convention.
+
+    The official clients emit ``enterpriseId`` from the auth payload and
+    ``enterprise_id`` in some backup shapes; both must resolve to one value so the
+    billing dispatch and the request headers never disagree.
+    """
+    if not isinstance(account, dict):
+        return None
+    for field in ("enterpriseId", "enterprise_id"):
+        value = account.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def is_enterprise_account(account) -> bool:
+    """Whether the account belongs to an enterprise tenant.
+
+    An enterprise id is a direct hit. Historical backups may carry only
+    ``type in {ultimate, exclusive}`` without the id, but those accounts still bill
+    through the enterprise endpoint, so the type is a fallback signal.
+    """
+    if enterprise_id_of(account) is not None:
+        return True
+    if not isinstance(account, dict):
+        return False
+    account_type = account.get("type")
+    return isinstance(account_type, str) and account_type.strip().lower() in ("ultimate", "exclusive")
 
 
 def catalog_cache_key(profile: str, identity: str | None = None) -> str:

@@ -13,6 +13,7 @@ import uuid
 
 import httpx
 
+from .client_profiles import canonical_uid
 from .site_routing import profile_for_auth
 
 PLUGIN_PREFIX = "/v2/plugin"
@@ -93,6 +94,10 @@ def validate_cred_data(data) -> tuple[str | None, str | None]:
         candidate = arr[0] if isinstance(arr, list) and arr and isinstance(arr[0], dict) else None
         acct = candidate if candidate else (acct if isinstance(acct, dict) else None)
     uid = str((acct or {}).get("uid") or "")
+    if not uid:
+        # A uid-less credential with a real email is still identifiable; the same
+        # canonical fallback is used by the identity hash so both agree.
+        uid = canonical_uid(acct)
     if not uid:
         return None, "缺少 account.uid"
     auth = data.get("auth") if isinstance(data.get("auth"), dict) else {}

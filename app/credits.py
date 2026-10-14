@@ -449,12 +449,20 @@ def fetch_enterprise_credits(access_token: str, uid: str = "", domain: str = "",
     host = hosts_for_token(access_token, domain)[0]
     url = host + ENTERPRISE_USAGE_PATH
     headers = _web_headers(host, access_token, uid, domain, enterprise_id)
-    with httpx.Client() as client:
-        status, payload = _post_json(client, url, headers, {})
+    try:
+        with httpx.Client() as client:
+            status, payload = _post_json(client, url, headers, {})
+    except AuthExpiredError:
+        raise
+    except httpx.HTTPError as error:
+        # A transport failure must not surface as a raw network exception.
+        raise _enterprise_error(f"积分接口网络失败: {type(error).__name__}") from None
     if status != 200:
         raise _enterprise_error(f"积分接口 HTTP {status}")
     code = payload.get("code")
-    if code not in (0, None):
+    # Accept both success codes: the gateway uses 0 for the enterprise allowance and
+    # 200 for some other billing routes, and these helpers must not disagree.
+    if code not in (0, 200, None):
         raise _enterprise_error(str(payload.get("msg") or f"积分接口 code={code}"))
     usage = parse_enterprise_usage(payload)
     if usage is None:

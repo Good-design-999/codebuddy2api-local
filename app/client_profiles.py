@@ -106,6 +106,62 @@ def is_enterprise_account(account) -> bool:
     return isinstance(account_type, str) and account_type.strip().lower() in ("ultimate", "exclusive")
 
 
+def normalize_uid(value) -> str:
+    """Coerce a uid to its canonical string form, treating blanks as absent.
+
+    A numeric uid is a real identity: it must hash the same as its string form and
+    must never be mistaken for a missing uid, which would let two different
+    accounts collapse onto one key.
+    """
+    if isinstance(value, bool) or value is None:
+        return ""
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        # Reject non-finite and fractional values: they are not account identifiers.
+        return str(int(value)) if value.is_integer() else ""
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+# Display placeholders that must never be used as an identity.
+_PLACEHOLDER_IDENTITIES = frozenset({"unknown", "手动添加", "未命名账号"})
+
+
+def identity_email(account) -> str | None:
+    """Return a real email usable as an identity when no uid exists.
+
+    Placeholders, and values that merely repeat another field, are rejected: they
+    would merge unrelated accounts onto a single key.
+    """
+    if not isinstance(account, dict):
+        return None
+    email = account.get("email")
+    if not isinstance(email, str):
+        return None
+    text = email.strip()
+    if not text or "@" not in text or text.lower() in _PLACEHOLDER_IDENTITIES:
+        return None
+    if text == normalize_uid(account.get("uid")):
+        return None
+    nickname = account.get("nickname")
+    if isinstance(nickname, str) and text == nickname.strip():
+        return None
+    return text.lower()
+
+
+def canonical_uid(account) -> str:
+    """The identity uid for an account block, falling back to a real email.
+
+    Every caller that derives an identity (import validation, hashing, sync
+    reconciliation, duplicate detection) must use this one function so the keys
+    they compare are always the same key.
+    """
+    return normalize_uid((account or {}).get("uid") if isinstance(account, dict) else None) \
+        or (identity_email(account) or "")
+
+
 def catalog_cache_key(profile: str, identity: str | None = None) -> str:
     revision = CLI_VERSION if profile_product(profile) == "cli" else f"{WORKBUDDY_VERSION}:{WORKBUDDY_CLI_VERSION}"
     key = f"{profile}:{revision}"

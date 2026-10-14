@@ -81,7 +81,8 @@ from app.site_routing import (DOMESTIC, INTERNATIONAL, PROFILE_ENDPOINTS, site_f
                               profile_for_auth, profile_for_headers, profile_region, profile_product,
                               profile_site, chat_url_for_headers, refresh_url_for_auth)
 from app.client_profiles import (CLI_VERSION, CLI_USER_AGENT, credential_headers, catalog_cache_key,
-                                 account_key, enterprise_id_of, is_enterprise_account)
+                                 account_key, canonical_uid, enterprise_id_of, identity_email,
+                                 is_enterprise_account, normalize_uid)
 try:
     from app import credits as credits_mod
 except ImportError:  # Disable credit maintenance when its module is unavailable.
@@ -199,14 +200,10 @@ def find_auth_files() -> list[Path]:
 
 
 def _cred_uid(path) -> Optional[str]:
-    """Read the account UID for deduplication, or return None when unavailable."""
+    """Read the canonical account identity for deduplication, or return None."""
     try:
         d = json.loads(Path(path).read_text(encoding="utf-8"))
-        acct = d.get("account")
-        if not isinstance(acct, dict):
-            arr = d.get("accounts")
-            acct = arr[0] if isinstance(arr, list) and arr and isinstance(arr[0], dict) else {}
-        return acct.get("uid")
+        return _credential_account(d).get("uid")
     except Exception:
         return None
 
@@ -227,33 +224,35 @@ def _credential_account(data: dict) -> dict:
     return account if isinstance(account, dict) else {}
 
 
-def _identity_email(account: dict) -> str | None:
-    """Return a real email usable as an identity when no uid exists.
-
-    Display placeholders and values that merely repeat another field must never be
-    used: they would merge unrelated accounts onto a single key.
-    """
-    email = account.get("email")
-    if not isinstance(email, str):
-        return None
-    text = email.strip()
-    if "@" not in text or text.lower() == "unknown" or text in ("手动添加", "未命名账号"):
-        return None
-    if text == str(account.get("nickname") or "").strip():
-        return None
-    if text == str(account.get("uid") or "").strip():
-        return None
-    return text.lower()
-
-
 def _credential_identity(data: dict) -> str:
-    """Hash the stable account identity, falling back to a real email without a uid."""
+    """Hash the canonical account identity, falling back to a real email without a uid.
+
+    The uid is normalised through the shared helper so a numeric uid hashes exactly
+    like its string form and is never mistaken for a missing one.
+    """
     account = _credential_account(data)
-    uid = account.get("uid")
-    if not (isinstance(uid, str) and uid.strip()):
-        uid = _identity_email(account) or ""
-    return account_key(profile_for_auth(data.get("auth") or {}), uid,
+    return account_key(profile_for_auth(data.get("auth") or {}), canonical_uid(account),
                        enterprise_id_of(account))
+
+
+def _enterprise_dispatch_id(token: str, account: dict, *, uid: str = "", domain: str = "") -> str:
+    """Return the tenant id that selects the enterprise billing endpoint.
+
+    A stored tenant id is used directly. A credential that is enterprise by type
+    alone (historical backups) needs one lookup; if that lookup cannot confirm the
+    tenant the sync must fail with a readable error instead of quietly querying the
+    personal endpoint, which answers with an empty package list for enterprise
+    accounts and would surface as "no credits available".
+    """
+    enterprise_id = enterprise_id_of(account)
+    if enterprise_id is not None:
+        return enterprise_id
+    if not is_enterprise_account(account):
+        return ""
+    resolved = credits_mod.resolve_enterprise_id(token, uid=uid, domain=domain)
+    if not resolved:
+        raise RuntimeError("企业账号缺少企业 ID，无法查询企业配额（已跳过个人版接口以避免误报余额）")
+    return resolved
 
 
 def _cred_identity(path) -> str | None:
@@ -395,8 +394,12 @@ class CredentialManager:
             auth = s.get("auth") or {}
             acct = _credential_account(s)
             profile = profile_for_auth(auth)
+            # ``uid`` here is the canonical identity value (a real email when no uid
+            # exists), identical to the input of ``account_key`` below, so callers that
+            # gate on it treat a uid-less account exactly like the pool does.
+            identity_uid = canonical_uid(acct)
             return {
-                "uid": str(acct.get("uid") or "") or None,
+                "uid": identity_uid or None,
                 "account_key": _credential_identity(s),
                 "site": profile_site(profile),
                 "profile": profile, "region": profile_region(profile), "product": profile_product(profile),
@@ -1503,18 +1506,23 @@ def _sync_credits(pool, ledger, entry, *, checkin, failed, expected_identity=Non
     try:
         with cm._lock:
             try:
-                if expected_identity is not None and cm.summary().get("account_key") != expected_identity:
+                # Read the identity from the credential itself, never rebuilt from headers: a
+                # uid-less account identified by email would otherwise hash to a different key
+                # here than the one the pool recorded, and its sync would be rejected forever.
+                summary = cm.summary()
+                if expected_identity is not None and summary.get("account_key") != expected_identity:
                     failed.add(cid)
                     return None
                 headers = cm.get_headers()
             finally:
                 generation = cm._generation
         profile = profile_for_headers(headers)
-        identity = account_key(profile, headers.get("X-User-Id"), headers.get("X-Enterprise-Id"))
+        identity = summary.get("account_key")
         if entry.get("account_key") and entry["account_key"] != identity:
             failed.add(cid)
             return None  # A path now owned by another account must be rescheduled with its own preferences.
         site = site_for_headers(headers)
+        # The upstream uid header is used verbatim; the local identity above is the key.
         token, uid, domain = _bearer_token(headers), headers.get("X-User-Id", ""), headers.get("X-Domain", "")
         day = daily_chat.today()
         if checkin and model_policy.credential_auto_checkin(CONFIG, entry) and not ledger.checkin_done(cid, day):
@@ -1570,16 +1578,14 @@ def _sync_credits(pool, ledger, entry, *, checkin, failed, expected_identity=Non
                 _sync_error(pool, ledger, entry, generation, "dailychat", error)
         if not model_policy.credential_enabled(CONFIG, entry):
             return None
-        # An enterprise type without a stored tenant id still bills through the
-        # enterprise endpoint, so resolve the id once before dispatching.
-        account = _credential_account(cm._session())
-        enterprise_id = enterprise_id_of(account)
-        if enterprise_id is None and is_enterprise_account(account):
-            enterprise_id = credits_mod.resolve_enterprise_id(token, uid=uid, domain=domain) or ""
+        # An enterprise account always bills through the enterprise endpoint, so an
+        # unresolvable tenant must fail loudly rather than silently fall back to the
+        # personal endpoint, which would report it as having no credits at all.
+        enterprise_id = _enterprise_dispatch_id(token, _credential_account(cm._session()),
+                                               uid=uid, domain=domain)
         balance = credits_mod.fetch_credits(
             token, uid=uid, domain=domain,
-            # Enterprise tenants bill through a different endpoint; the dispatch key
-            # travels from the credential so both views agree.
+            # The dispatch key travels from the credential so both views agree.
             enterprise_id=enterprise_id or "")
         if bool(balance.get("intl")) != (site == INTERNATIONAL):
             raise ValueError("积分响应与凭据站点不一致")

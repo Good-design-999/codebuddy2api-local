@@ -59,15 +59,17 @@ describe("dashboard granularity", () => {
       };
     });
     render(<Dashboard />);
-    await screen.findByRole("img", { name: "按日请求量趋势" });
+    await screen.findByRole("img", { name: "按日用量趋势" });
     fireEvent.change(screen.getByLabelText("统计时间范围"), { target: { value: "1" } });
-    const hourly = await screen.findByRole("img", { name: "按小时请求量趋势" });
-    expect(hourly.querySelectorAll("circle")).toHaveLength(24);
+    const hourly = await screen.findByRole("img", { name: "按小时用量趋势" });
+    expect(hourly.querySelectorAll('[data-series="requests"] circle')).toHaveLength(24);
     expect(get).toHaveBeenCalledWith("/dashboard?days=1&granularity=auto", expect.anything());
     fireEvent.change(screen.getByLabelText("统计粒度"), { target: { value: "day" } });
     await waitFor(() =>
       expect(
-        screen.getByRole("img", { name: "按日请求量趋势" }).querySelectorAll("circle"),
+        screen
+          .getByRole("img", { name: "按日用量趋势" })
+          .querySelectorAll('[data-series="requests"] circle'),
       ).toHaveLength(1),
     );
     expect(get).toHaveBeenCalledWith("/dashboard?days=1&granularity=day", expect.anything());
@@ -112,5 +114,67 @@ describe("official credits", () => {
     render(<Dashboard />);
     expect(await screen.findByText("无限")).toBeTruthy();
     expect(screen.getByText("12.5")).toBeTruthy();
+  });
+});
+
+describe("overview cards and usage trend", () => {
+  it("renders KPI cards with prior-period deltas and a three-series trend", async () => {
+    vi.spyOn(api, "get").mockResolvedValue({
+      data: {
+        summary: {
+          requests: 200,
+          success: 198,
+          error: 2,
+          success_rate: 0.99,
+          total_tokens: 1000000,
+          input_tokens: 800000,
+          output_tokens: 200000,
+          cache_read_tokens: 600000,
+          cache_creation_tokens: 1000,
+          reasoning_tokens: 5000,
+          credit: 42,
+          p95_duration_ms: 23900,
+        },
+        previous: { requests: 100, credit: 40 },
+        series: [
+          {
+            bucket: 1789344000,
+            date: "2026-09-14",
+            requests: 120,
+            success: 119,
+            error: 1,
+            total_tokens: 600000,
+            credit: 25,
+          },
+          {
+            bucket: 1789430400,
+            date: "2026-09-15",
+            requests: 80,
+            success: 79,
+            error: 1,
+            total_tokens: 400000,
+            credit: 17,
+          },
+        ],
+        models: [],
+        profiles: [],
+        health: { credentials: [] },
+        storage: {},
+        range: { granularity: "day" },
+        official_credits: {},
+        generated_at: 1,
+      },
+    });
+    render(<Dashboard />);
+    expect(await screen.findByText("较上周期 +100.0%")).toBeTruthy();
+    expect(screen.getByText("较上周期 +5.0%")).toBeTruthy();
+    expect(screen.getByText("P95 延迟 23.9s")).toBeTruthy();
+    expect(screen.getByText("缓存命中率 75.0%")).toBeTruthy();
+    expect(screen.getByText(/^推理 Token/)).toBeTruthy();
+    const chart = screen.getByRole("img", { name: "按日用量趋势" });
+    expect(chart.querySelectorAll("path[data-series]")).toHaveLength(3);
+    fireEvent.focus(chart);
+    expect(await screen.findByRole("tooltip", { name: /2026-09-14/ })).toBeTruthy();
+    expect(screen.getByText("2026-09-14 · UTC")).toBeTruthy();
   });
 });

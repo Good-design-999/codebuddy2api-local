@@ -1,11 +1,43 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import s from "./ui.module.scss";
 
 export type Lang = "zh" | "en";
 
 // Variable keys; both languages ship fully loaded. A missing entry falls back
 // to zh and finally to the key itself so partial coverage stays readable.
 const zh: Record<string, string> = {
+  "storage.title": "存储管理",
+  "storage.desc": "日志库体积、归档、清理与压缩指引。",
+  "storage.status": "存储状态",
+  "storage.stateDegraded": "存储异常",
+  "storage.stateUnknown": "状态未知",
+  "storage.dbFile": "数据库文件",
+  "storage.walFile": "WAL 文件",
+  "storage.logical": "日志逻辑占用",
+  "storage.reclaimable": "可回收空间",
+  "storage.counts": "请求 {requests} 条 · 事件 {events} 条 · 保留 {days} 天",
+  "storage.pendingCleanup": "有待清理数据",
+  "storage.cleanup": "清理",
+  "storage.cleanupDesc": "在线删除日志明细或全部日志与统计；全部清理需要确认文本与当前 API key。",
+  "storage.cleanupOpen": "打开清理",
+  "storage.archive": "归档旧日志",
+  "storage.archiveHint": "导出为 JSONL 后从库中删除，统计聚合不受影响",
+  "storage.archiveDays": "归档早于（天）",
+  "storage.archiveSubmit": "归档并删除",
+  "storage.archiveBusy": "正在归档…",
+  "storage.archiveEmpty": "没有早于 {days} 天的日志可归档",
+  "storage.archiveDone": "已归档 {count} 条到 {file}",
+  "storage.archiveResult": "归档结果",
+  "storage.archives": "归档文件",
+  "storage.archivesEmpty": "暂无归档",
+  "storage.vacuum": "压缩数据库",
+  "storage.vacuumDesc":
+    "删除与归档释放的空间留在 SQLite 空闲页中{reclaimable}。VACUUM 需要独占锁，不能在网关运行中执行，请按以下步骤操作：",
+  "storage.vacuumReclaim": "（当前约可回收 {size}）",
+  "storage.vacuumNote": "压缩期间网关不可用；统计聚合保存在同一库中，VACUUM 不影响数据。",
+  "storage.step.stop": "# 1. 停止网关",
+  "storage.step.stopLocal": "# 本地部署则停止 converter 进程",
+  "storage.step.vacuum": "# 2. 压缩（在部署目录执行）",
+  "storage.step.restart": "# 3. 重启网关",
   "app.skip": "跳转到内容",
   "app.workspace": "工作空间",
   "app.primaryNav": "主导航",
@@ -17,11 +49,13 @@ const zh: Record<string, string> = {
   "app.signOut": "退出登录",
   "app.verifying": "正在验证登录状态…",
   "app.backToSignIn": "返回登录",
-  "app.language": "切换语言 / Switch language",
+  "appearance.language": "语言",
+  "appearance.lang.system": "系统语言",
   "nav.overview": "概览",
   "nav.models": "模型路由",
   "nav.credentials": "凭证管理",
   "nav.logs": "日志审计",
+  "nav.storage": "存储管理",
   "nav.settings": "系统设置",
   "login.subtitle": "网关管理",
   "login.title": "登录管理控制台",
@@ -156,6 +190,27 @@ const zh: Record<string, string> = {
   "dash.storage.shm": "SHM 文件",
   "dash.storage.credits": "网关已知 Credit",
   "dash.storage.creditsNote": "官方账号余额",
+  "dash.kpi.requests": "请求数",
+  "dash.kpi.successRate": "成功率",
+  "dash.kpi.failures": "失败数",
+  "dash.kpi.credit": "Credit 消耗",
+  "dash.kpi.totalTokens": "总 Token",
+  "dash.kpi.inputTokens": "输入 Token",
+  "dash.kpi.outputTokens": "输出 Token",
+  "dash.kpi.cacheTokens": "缓存 Token",
+  "dash.vsPrevious": "较上周期 {pct}",
+  "dash.p95Latency": "P95 延迟 {value}",
+  "dash.errorBuckets": "{n} 个异常时间点",
+  "dash.reasoningSub": "推理 Token {value}",
+  "dash.shareOf": "占比 {pct}",
+  "dash.cacheHitRate": "缓存命中率 {pct}",
+  "dash.usageTrend": "用量趋势总览",
+  "dash.usageTrendHint": "请求、Token 与 Credit 在同一时间范围内联动展示。",
+  "dash.usageTrend.daily": "按日用量趋势",
+  "dash.usageTrend.hourly": "按小时用量趋势",
+  "dash.trendData": "查看趋势数据表",
+  "dash.zoomReset": "复位缩放",
+  "dash.zoomHint": "滚轮缩放 · 双击复位",
   "dash.unlimited": "无限",
   "dash.storage.unknown": "未知",
   "dash.storage.collectDegraded": "采集降级",
@@ -218,6 +273,42 @@ const zh: Record<string, string> = {
 };
 
 const en: Record<string, string> = {
+  "storage.title": "Storage",
+  "storage.desc": "Log database size, archiving, cleanup and compaction guide.",
+  "storage.status": "Storage status",
+  "storage.stateDegraded": "Storage degraded",
+  "storage.stateUnknown": "Unknown",
+  "storage.dbFile": "Database file",
+  "storage.walFile": "WAL file",
+  "storage.logical": "Logical log size",
+  "storage.reclaimable": "Reclaimable space",
+  "storage.counts": "{requests} requests · {events} events · kept {days} days",
+  "storage.pendingCleanup": "cleanup pending",
+  "storage.cleanup": "Cleanup",
+  "storage.cleanupDesc":
+    "Delete log details or all logs and statistics online; a full cleanup needs the confirmation text and the current API key.",
+  "storage.cleanupOpen": "Open cleanup",
+  "storage.archive": "Archive old logs",
+  "storage.archiveHint":
+    "Exported as JSONL, then removed from the database; statistics are unaffected",
+  "storage.archiveDays": "Archive entries older than (days)",
+  "storage.archiveSubmit": "Archive and delete",
+  "storage.archiveBusy": "Archiving…",
+  "storage.archiveEmpty": "No logs older than {days} days to archive",
+  "storage.archiveDone": "Archived {count} entries to {file}",
+  "storage.archiveResult": "archive result",
+  "storage.archives": "Archive files",
+  "storage.archivesEmpty": "No archives yet",
+  "storage.vacuum": "Compact the database",
+  "storage.vacuumDesc":
+    "Space freed by deletion and archiving stays in SQLite free pages{reclaimable}. VACUUM needs an exclusive lock and cannot run while the gateway is up; follow these steps:",
+  "storage.vacuumReclaim": " (about {size} reclaimable now)",
+  "storage.vacuumNote":
+    "The gateway is unavailable during compaction; statistics live in the same database and are unaffected by VACUUM.",
+  "storage.step.stop": "# 1. Stop the gateway",
+  "storage.step.stopLocal": "# for a local deployment stop the converter process",
+  "storage.step.vacuum": "# 2. Compact (run in the deployment directory)",
+  "storage.step.restart": "# 3. Restart the gateway",
   "app.skip": "Skip to content",
   "app.workspace": "Workspace",
   "app.primaryNav": "Primary navigation",
@@ -229,11 +320,13 @@ const en: Record<string, string> = {
   "app.signOut": "Sign out",
   "app.verifying": "Verifying session…",
   "app.backToSignIn": "Back to sign-in",
-  "app.language": "切换语言 / Switch language",
+  "appearance.language": "Language",
+  "appearance.lang.system": "System",
   "nav.overview": "Overview",
   "nav.models": "Model routing",
   "nav.credentials": "Credentials",
   "nav.logs": "Audit logs",
+  "nav.storage": "Storage",
   "nav.settings": "Settings",
   "login.subtitle": "Gateway management",
   "login.title": "Sign in to the console",
@@ -369,6 +462,27 @@ const en: Record<string, string> = {
   "dash.storage.shm": "SHM file",
   "dash.storage.credits": "Gateway-known credits",
   "dash.storage.creditsNote": "Official account balance",
+  "dash.kpi.requests": "Requests",
+  "dash.kpi.successRate": "Success rate",
+  "dash.kpi.failures": "Failures",
+  "dash.kpi.credit": "Credit used",
+  "dash.kpi.totalTokens": "Total tokens",
+  "dash.kpi.inputTokens": "Input tokens",
+  "dash.kpi.outputTokens": "Output tokens",
+  "dash.kpi.cacheTokens": "Cached tokens",
+  "dash.vsPrevious": "{pct} vs prior period",
+  "dash.p95Latency": "P95 latency {value}",
+  "dash.errorBuckets": "{n} anomalous points",
+  "dash.reasoningSub": "Reasoning tokens {value}",
+  "dash.shareOf": "{pct} of total",
+  "dash.cacheHitRate": "Cache hit rate {pct}",
+  "dash.usageTrend": "Usage trend",
+  "dash.usageTrendHint": "Requests, tokens and Credit share one time range.",
+  "dash.usageTrend.daily": "Daily usage trend",
+  "dash.usageTrend.hourly": "Hourly usage trend",
+  "dash.trendData": "View trend data table",
+  "dash.zoomReset": "Reset zoom",
+  "dash.zoomHint": "Scroll to zoom · double-click reset",
   "dash.unlimited": "Unlimited",
   "dash.storage.unknown": "Unknown",
   "dash.storage.collectDegraded": "Collection degraded",
@@ -435,6 +549,37 @@ const messages: Record<Lang, Record<string, string>> = { zh, en };
 const STORAGE_KEY = "codebuddy2api.lang";
 const LANG_EVENT = "codebuddy.lang";
 
+export type LangPref = "system" | Lang;
+
+function systemLang(): Lang {
+  try {
+    return navigator.language?.toLowerCase().startsWith("zh") ? "zh" : "en";
+  } catch {
+    return "zh";
+  }
+}
+function savedPref(): LangPref {
+  try {
+    const value = localStorage.getItem(STORAGE_KEY);
+    return value === "zh" || value === "en" ? value : "system";
+  } catch {
+    return "system";
+  }
+}
+let currentPref: LangPref = "system";
+export function languagePreference(): LangPref {
+  return currentPref;
+}
+export function chooseLanguage(pref: LangPref) {
+  currentPref = pref;
+  try {
+    localStorage.setItem(STORAGE_KEY, pref);
+  } catch {
+    /* ignore */
+  }
+  window.dispatchEvent(new CustomEvent(LANG_EVENT, { detail: pref }));
+}
+
 let currentLang: Lang = "zh";
 const LangContext = createContext<Lang>("zh");
 
@@ -460,47 +605,28 @@ export function useT() {
 }
 
 export function LanguageProvider({ children }: { children: ReactNode }) {
-  const [lang, setLang] = useState<Lang>(() => {
-    try {
-      return localStorage.getItem(STORAGE_KEY) === "en" ? "en" : "zh";
-    } catch {
-      return "zh";
-    }
+  const [pref, setPref] = useState<LangPref>(() => {
+    currentPref = savedPref();
+    return currentPref;
   });
+  const [system, setSystem] = useState<Lang>(systemLang);
+  const lang = pref === "system" ? system : pref;
   currentLang = lang;
   useEffect(() => {
-    // 只更新文档语言；localStorage 仅在用户主动切换时写入，
-    // 保证未操作的访客在站点上不留下任何存储痕迹。
     document.documentElement.lang = lang === "en" ? "en" : "zh-CN";
   }, [lang]);
   useEffect(() => {
     const apply = (event: Event) => {
       const detail = (event as CustomEvent<string>).detail;
-      if (detail === "zh" || detail === "en") setLang(detail);
+      if (detail === "zh" || detail === "en" || detail === "system") setPref(detail);
     };
     window.addEventListener(LANG_EVENT, apply);
     return () => window.removeEventListener(LANG_EVENT, apply);
   }, []);
+  useEffect(() => {
+    const sync = () => setSystem(systemLang());
+    window.addEventListener("languagechange", sync);
+    return () => window.removeEventListener("languagechange", sync);
+  }, []);
   return <LangContext.Provider value={lang}>{children}</LangContext.Provider>;
-}
-
-export function LanguageToggle() {
-  return (
-    <button
-      className={s.sidebarToggle}
-      onClick={() => {
-        const next = currentLang === "zh" ? "en" : "zh";
-        try {
-          localStorage.setItem(STORAGE_KEY, next);
-        } catch {
-          /* ignore */
-        }
-        window.dispatchEvent(new CustomEvent(LANG_EVENT, { detail: next }));
-      }}
-      aria-label={translate("app.language")}
-      title={translate("app.language")}
-    >
-      {currentLang === "zh" ? "EN" : "中"}
-    </button>
-  );
 }

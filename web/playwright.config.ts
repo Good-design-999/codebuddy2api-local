@@ -7,6 +7,8 @@ export default defineConfig({
   fullyParallel: false,
   use: {
     baseURL: "http://127.0.0.1:5174",
+    // The UI follows the browser language by default; the specs are written in Chinese.
+    locale: "zh-CN",
     viewport: { width: 1440, height: 1050 },
     browserName: "chromium",
     launchOptions: {

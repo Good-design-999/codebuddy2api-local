@@ -15,6 +15,72 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.audit_store import SCHEMA_VERSION, AuditStore, _CLEANUP_BATCH
 
 
+class ArchiveAndStorageStatsTests(unittest.TestCase):
+    """Archive exports old rows before deleting them; storage reports reclaimable pages."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp.name) / "audit.sqlite3"
+        self.store = AuditStore(self.path)
+
+    def tearDown(self):
+        self.store.close()
+        self.temp.cleanup()
+
+    def record(self, id, started_at, duration_ms=100):
+        return {"id": id, **self.store.ticket(), "started_at": started_at,
+                "public_model": "m", "upstream_model": "u", "profile": "p",
+                "credential": "c", "protocol": "chat", "status_code": 200,
+                "duration_ms": duration_ms, "outcome": "success"}
+
+    def test_archive_exports_then_deletes_and_keeps_recent_rows(self):
+        old = time.time() - 10 * 86400
+        self.store.record_request(self.record("old", old, duration_ms=200))
+        self.store.record_request(self.record("new", time.time(), duration_ms=100))
+        self.store.event("runtime", "rotate", {"note": "old"})
+        self.assertEqual(self.store.dashboard(30)["summary"]["p95_duration_ms"], 200)
+        result = self.store.archive(7)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["archived_requests"], 1)
+        self.assertEqual(result["archived_events"], 0)  # the event is fresh
+        archive = self.path.parent / "archives" / result["file"]
+        lines = archive.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0])["id"], "old")
+        self.assertEqual(oct(archive.stat().st_mode & 0o777), "0o600")
+        self.assertIsNone(self.store.get_request("old"))
+        self.assertIsNotNone(self.store.get_request("new"))
+        # Aggregates survive, replay dedup stays intact, and partial detail samples hide P95.
+        replay = self.store.record_request(self.record("old", old, duration_ms=200))
+        self.assertEqual(replay, {"ok": True, "recorded": False, "reason": "duplicate"})
+        summary = self.store.dashboard(30)["summary"]
+        self.assertEqual(summary["requests"], 2)
+        self.assertIsNone(summary["p95_duration_ms"])
+
+    def test_archive_empty_window_is_a_noop_without_a_file(self):
+        self.store.record_request(self.record("fresh", time.time()))
+        result = self.store.archive(7)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["archived_requests"], 0)
+        self.assertIsNone(result["file"])
+        self.assertFalse((self.path.parent / "archives").exists())
+
+    def test_archive_rejects_invalid_windows(self):
+        for days in (0, -1, 3651, 1.5, "30", True):
+            with self.assertRaises(ValueError):
+                self.store.archive(days)
+
+    def test_storage_reports_reclaimable_bytes(self):
+        storage = self.store.storage()
+        self.assertIn("reclaimable_bytes", storage)
+        self.assertGreaterEqual(storage["reclaimable_bytes"], 0)
+        self.assertGreater(storage["page_count"], 0)
+        for _ in range(50):
+            self.store.record_request(self.record(f"bulk-{_}", time.time()))
+        self.store.clear("details")
+        self.assertGreater(self.store.storage()["reclaimable_bytes"], 0)
+
+
 class AuditStoreTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

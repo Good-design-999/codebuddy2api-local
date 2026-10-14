@@ -664,5 +664,35 @@ class AdminApiTests(unittest.TestCase):
         self.assertNotIn("synthetic-secret-token", response.text)
 
 
+class StorageAdminTests(AdminApiTests):
+    def test_storage_reports_sizes_and_archive_listing(self):
+        self.audit.storage.return_value = {"db_bytes": 10, "wal_bytes": 0, "reclaimable_bytes": 4096,
+                                           "degraded": False}
+        self.audit.path = self.root / "logs.sqlite3"
+        (self.root / "archives").mkdir()
+        (self.root / "archives" / "audit-20260101-000000-deadbeef.jsonl").write_text("{}\n")
+        response = self.client.get("/admin/storage", headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["reclaimable_bytes"], 4096)
+        self.assertEqual(data["archives"], ["audit-20260101-000000-deadbeef.jsonl"])
+
+    def test_storage_archive_validates_window_and_reports_result(self):
+        self.audit.archive.return_value = {"ok": True, "archived_requests": 2,
+                                           "archived_events": 1, "file": "audit-x.jsonl"}
+        response = self.client.post("/admin/storage/archive", headers=self.headers, json={"days": 30})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["archived_requests"], 2)
+        self.audit.archive.assert_called_once_with(30)
+        for bad in (0, 3651, "30", 1.5, True):
+            self.assertEqual(
+                self.client.post("/admin/storage/archive", headers=self.headers,
+                                 json={"days": bad}).status_code, 400)
+        self.audit.archive.return_value = {"ok": False}
+        self.assertEqual(
+            self.client.post("/admin/storage/archive", headers=self.headers,
+                             json={"days": 30}).status_code, 503)
+
+
 if __name__ == "__main__":
     unittest.main()

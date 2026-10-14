@@ -53,6 +53,16 @@ export function metric(value: unknown): string {
   const n = number(value);
   return n === null ? "—" : new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(n);
 }
+// Axis-scale abbreviation: 1234 → 1.2K, 429669080 → 429.7M; exact values stay in tooltips.
+export function compact(value: unknown): string {
+  const n = number(value);
+  if (n === null) return "—";
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+  if (abs >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (abs >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(n);
+}
 export function errorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
     const bodyData: unknown = error.response?.data;
@@ -138,30 +148,71 @@ export async function establishSession(apiKey?: string) {
     if (apiKey !== undefined) throw error;
   }
 }
-export function useResource<T>(path: string, normalize: (value: unknown) => T) {
-  const [state, setState] = useState<{ data: T | null; loading: boolean; error: string | null }>({
-    data: null,
-    loading: true,
+// Session-level response cache for heavy pages (model routing): reopening the
+// page renders the last snapshot instantly while a fresh fetch replaces it.
+const resourceCache = new Map<string, unknown>();
+useSession.subscribe((state, prev) => {
+  if (state.status !== "authenticated" || state.csrf !== prev.csrf) resourceCache.clear();
+});
+export function useResource<T>(
+  path: string,
+  normalize: (value: unknown) => T,
+  options?: { cache?: boolean },
+) {
+  const cached = options?.cache ? resourceCache.get(path) : undefined;
+  const [state, setState] = useState<{
+    path: string;
+    data: T | null;
+    loading: boolean;
+    error: string | null;
+  }>({
+    path,
+    data: cached === undefined ? null : normalize(cached),
+    loading: cached === undefined,
     error: null,
   });
   const [revision, setRevision] = useState(0);
   const reload = useCallback(() => setRevision((v) => v + 1), []);
   useEffect(() => {
     const controller = new AbortController();
-    setState({ data: null, loading: true, error: null });
+    const cachedForPath = options?.cache ? resourceCache.get(path) : undefined;
+    // Keep same-path data (or a cached snapshot) on screen during refresh;
+    // clear stale data when switching to a different path without a cache hit.
+    setState((prev) => {
+      const data =
+        prev.path === path
+          ? prev.data
+          : cachedForPath === undefined
+            ? null
+            : normalize(cachedForPath);
+      return { path, data, loading: data === null, error: null };
+    });
     void api
       .get<unknown>(path, { signal: controller.signal })
       .then((response) => {
-        if (!controller.signal.aborted)
-          setState({ data: normalize(response.data), loading: false, error: null });
+        if (controller.signal.aborted) return;
+        if (options?.cache) resourceCache.set(path, response.data);
+        setState({ path, data: normalize(response.data), loading: false, error: null });
       })
       .catch((error: unknown) => {
-        if (!controller.signal.aborted)
-          setState({ data: null, loading: false, error: errorMessage(error) });
+        if (controller.signal.aborted) return;
+        setState((prev) => ({
+          path,
+          data: prev.path === path ? prev.data : null,
+          loading: false,
+          error: errorMessage(error),
+        }));
       });
     return () => controller.abort();
-  }, [path, revision, normalize]);
-  return { ...state, reload };
+  }, [path, revision, normalize, options?.cache]);
+  const currentData =
+    state.path === path ? state.data : cached === undefined ? null : normalize(cached);
+  return {
+    data: currentData,
+    loading: state.path === path ? state.loading : cached === undefined,
+    error: state.path === path ? state.error : null,
+    reload,
+  };
 }
 export type ModelRule = {
   id: string;
@@ -183,7 +234,10 @@ export type ModelRule = {
 export function modelResponse(value: unknown): {
   revision: number;
   models: ModelRule[];
+  model_guard?: boolean;
+  model_guard_locked?: boolean;
   model_capability_guard?: boolean;
+  model_capability_guard_locked?: boolean;
 } {
   const data = object(value);
   if (typeof data.revision !== "number") throw new Error("模型响应缺少 revision");
@@ -215,8 +269,15 @@ export function modelResponse(value: unknown): {
   return {
     revision: data.revision,
     models,
+    model_guard: typeof data.model_guard === "boolean" ? data.model_guard : undefined,
+    model_guard_locked:
+      typeof data.model_guard_locked === "boolean" ? data.model_guard_locked : undefined,
     model_capability_guard:
       typeof data.model_capability_guard === "boolean" ? data.model_capability_guard : undefined,
+    model_capability_guard_locked:
+      typeof data.model_capability_guard_locked === "boolean"
+        ? data.model_capability_guard_locked
+        : undefined,
   };
 }
 export type Credential = RecordValue & { id: string; name: string | null };

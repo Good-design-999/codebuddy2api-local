@@ -113,6 +113,7 @@ test("manual trial uses the real admin API and persists success and failed-attem
     expect((await response.json()).results[0].ok).toBe(true);
   }
   await page.goto("/dashboard/credentials");
+  await page.getByRole("button", { name: "更多 trial-timeout.info" }).click();
   await page.getByRole("button", { name: "领取体验积分 trial-timeout.info" }).click();
   const drawer = page.getByRole("dialog");
   await expect(drawer.getByRole("button", { name: "确认领取" })).toBeEnabled();
@@ -126,6 +127,7 @@ test("manual trial uses the real admin API and persists success and failed-attem
   await expect(drawer).toHaveCount(0);
   await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
   await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "更多 trial-success.info" }).click();
   await page.getByRole("button", { name: "领取体验积分 trial-success.info" }).click();
   await drawer.getByRole("button", { name: "确认领取" }).click();
   await expect(drawer.getByText("已领取", { exact: true })).toBeVisible();
@@ -133,6 +135,7 @@ test("manual trial uses the real admin API and persists success and failed-attem
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: "test-results/manual-trial-success-mobile.png", fullPage: true });
   await page.reload();
+  await page.getByRole("button", { name: "更多 trial-success.info" }).click();
   await page.getByRole("button", { name: "领取体验积分 trial-success.info" }).click();
   await expect(page.getByRole("dialog").getByRole("button", { name: "确认领取" })).toBeDisabled();
   const rows = (await (await page.request.get("/admin/credentials")).json()).credentials;

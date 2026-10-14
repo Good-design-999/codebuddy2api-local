@@ -65,19 +65,28 @@ test("per-account automation persists with scoped actions, dark mode and mobile 
     return route.fulfill({ status: 404, json: {} });
   });
   await page.goto("/dashboard/credentials");
+  await page.getByRole("button", { name: "任务配置 cn.info" }).click();
   await expect(page.getByRole("switch", { name: "自动签到 cn.info" })).toBeChecked();
   await expect(page.getByRole("switch", { name: "自动旅行 cn.info" })).toBeChecked();
+  await page.getByRole("button", { name: "关闭" }).click();
+  await page.getByRole("button", { name: "任务配置 intl.info" }).click();
   await expect(page.getByRole("switch", { name: "自动签到 intl.info" })).not.toBeChecked();
   await expect(page.getByRole("switch", { name: "自动旅行 intl.info" })).toBeDisabled();
   await page.getByRole("switch", { name: "自动签到 intl.info" }).click();
   await expect(page.getByText(/保存不会立即执行/)).toBeVisible();
   expect(writes).toEqual(["PATCH /admin/credentials/intl"]);
   await page.reload();
+  await page.getByRole("button", { name: "任务配置 intl.info" }).click();
   await expect(page.getByRole("switch", { name: "自动签到 intl.info" })).toBeChecked();
+  await page.getByRole("button", { name: "关闭" }).click();
+  await page.getByRole("button", { name: "任务配置 cn.info" }).click();
   await page.getByRole("switch", { name: "自动旅行 cn.info" }).click();
   await expect(page.getByText(/自动旅行已关闭/)).toBeVisible();
+  await page.getByRole("button", { name: "关闭" }).click();
+  await page.getByRole("button", { name: "更多 cn.info" }).click();
   await page.getByRole("button", { name: "旅行状态 cn.info" }).click();
   await expect(page.getByText("部分完成")).toBeVisible();
+  await page.getByRole("button", { name: "更多 cn.info" }).click();
   await page.getByRole("button", { name: "旅行领派 cn.info" }).click();
   await expect(page.getByText(/领取已确认，后续状态查询失败/)).toBeVisible();
   expect(writes).toEqual([
@@ -90,7 +99,7 @@ test("per-account automation persists with scoped actions, dark mode and mobile 
   await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-  await page.getByRole("switch", { name: "自动签到 cn.info" }).scrollIntoViewIfNeeded();
+  await page.getByRole("button", { name: "任务配置 cn.info" }).scrollIntoViewIfNeeded();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: "test-results/automation-mobile-dark.png", fullPage: true });
   expect(errors).toEqual([]);

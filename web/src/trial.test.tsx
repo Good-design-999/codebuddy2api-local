@@ -1,8 +1,17 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vite-plus/test";
 import { Trial } from "./Trial";
 import { Credentials } from "./pages/Credentials";
 import { api, useResource } from "./api";
+
+function openRowMenu(credentialName: string) {
+  const row = screen
+    .getAllByText(credentialName)
+    .map((el) => el.closest<HTMLElement>("tr, article"))
+    .find((tr) => tr && within(tr).queryByRole("button", { name: /^更多/ }));
+  if (!row) throw new Error(`row for ${credentialName} not found`);
+  fireEvent.click(within(row).getByRole("button", { name: /^更多/ }));
+}
 
 vi.mock("./api", async (original) => ({
   ...(await original<typeof import("./api")>()),
@@ -33,7 +42,9 @@ it("only opens a confirmation drawer for supported accounts and sends no claim o
   });
   const post = vi.spyOn(api, "post");
   render(<Credentials />);
+  openRowMenu("cn.info");
   expect(screen.queryByRole("button", { name: "领取体验积分 cn.info" })).toBeNull();
+  openRowMenu("intl.info");
   fireEvent.click(screen.getByRole("button", { name: "领取体验积分 intl.info" }));
   expect(screen.getByRole("dialog")).toBeTruthy();
   expect(screen.getByRole("button", { name: "确认领取" })).toHaveProperty("disabled", false);

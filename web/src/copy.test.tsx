@@ -93,17 +93,17 @@ describe("concise user-facing copy", () => {
   it("keeps configuration source, locks, and pending effective values clear", () => {
     resource(settings);
     const { container } = render(<Settings />);
+    expect(screen.getByText("当前生效：30")).toBeTruthy();
+    expect(screen.getByText("已保存：60")).toBeTruthy();
+    expect(screen.queryByText("当前生效：未知")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: /外部锁定/ }));
     expect(screen.getByText("环境变量")).toBeTruthy();
     expect(screen.getByText("命令行")).toBeTruthy();
     expect(screen.getByText("重启后生效")).toBeTruthy();
     expect(screen.getAllByText("外部锁定")).toHaveLength(2);
-    expect(screen.getByText("当前生效：30")).toBeTruthy();
-    expect(screen.getByText("已保存：60")).toBeTruthy();
-    expect(screen.queryByText("当前生效：未知")).toBeNull();
     expect(container.textContent).not.toMatch(
       /revision|schema|WebUI 不写入|服务端校验为准|内部常量/,
     );
-    expect(screen.getByText("查看存储详情").closest("details")?.open).toBe(false);
   });
 
   it("surfaces a session store that could not persist a revocation", () => {
@@ -155,7 +155,7 @@ describe("concise user-facing copy", () => {
     expect(screen.getByText("人工停用")).toBeTruthy();
     expect(screen.getByText("1 个模型冷却")).toBeTruthy();
     expect(screen.getAllByText("—").length).toBeGreaterThan(0);
-    expect(screen.getByText("网关已知 Credit").closest("section")?.textContent).toContain("0");
+    expect(screen.getAllByText("Credit 消耗")[0].closest("section")?.textContent).toContain("0");
     expect(container.textContent).not.toMatch(
       /一个客户端请求只统计一次|未知用量不计为零|人工状态与熔断独立|未导入的旧文本日志/,
     );

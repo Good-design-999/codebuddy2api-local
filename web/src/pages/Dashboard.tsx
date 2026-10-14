@@ -13,6 +13,7 @@ import {
 import s from "../ui.module.scss";
 function normalize(value: unknown): RecordValue & {
   summary: RecordValue;
+  previous: RecordValue | null;
   series: RecordValue[];
   models: RecordValue[];
   profiles: RecordValue[];
@@ -28,6 +29,8 @@ function normalize(value: unknown): RecordValue & {
   return {
     ...d,
     summary: object(d.summary, t("dash.summary")),
+    previous:
+      d.previous === null || d.previous === undefined ? null : object(d.previous, "上周期汇总"),
     series: list(d.series, "趋势"),
     models: list(d.models, "模型排行"),
     profiles: list(d.profiles, t("dash.profileUsage")),
@@ -42,7 +45,7 @@ function Health({ data }: { data: RecordValue }) {
   const credentials = list(data.credentials);
   if (!credentials.length) return <Empty title={t("dash.credentialHealthEmpty")} />;
   return (
-    <div className={s.healthList}>
+    <div className={`${s.healthList} ${s.panelScroll}`}>
       {credentials.map((c, i) => (
         <div key={i}>
           <div>
@@ -71,7 +74,7 @@ function OfficialCredits({ value }: { value: unknown }) {
   const rows = Object.entries(object(value));
   if (!rows.length) return <Empty title={t("dash.balanceSnapshotEmpty")} />;
   return (
-    <div className={s.tableWrap}>
+    <div className={`${s.tableWrap} ${s.panelScroll}`}>
       <table>
         <thead>
           <tr>
@@ -111,14 +114,7 @@ function OfficialCredits({ value }: { value: unknown }) {
     </div>
   );
 }
-function bytes(value: unknown) {
-  const n = number(value);
-  if (n === null) return t("dash.storage.unknown");
-  if (n < 1024) return `${metric(n)} B`;
-  if (n < 1048576) return `${(n / 1024).toFixed(1)} KiB`;
-  return `${(n / 1048576).toFixed(1)} MiB`;
-}
-import { Trend } from "../Trend";
+import { KpiCards, UsageTrend } from "../UsageOverview";
 import { t, useT } from "../i18n";
 export { Trend } from "../Trend";
 export function Dashboard() {
@@ -126,10 +122,11 @@ export function Dashboard() {
   const [days, setDays] = useState("7");
   const [granularity, setGranularity] = useState("auto");
   const resource = useResource(`/dashboard?days=${days}&granularity=${granularity}`, normalize);
+  // Hourly buckets power the trend's zoom-in granularity swap.
+  const hourly = useResource(`/dashboard?days=${days}&granularity=hour`, normalize);
   const d = resource.data;
   const period = d?.range ?? {};
   const actualGrain = period.granularity === "hour" ? "hour" : "day";
-  const rate = number(d?.summary.success_rate);
   return (
     <>
       <PageTitle
@@ -156,7 +153,12 @@ export function Dashboard() {
               <option value="hour">{t("dash.granularityHour")}</option>
               <option value="day">{t("dash.granularityDay")}</option>
             </select>
-            <button onClick={resource.reload}>
+            <button
+              onClick={() => {
+                resource.reload();
+                hourly.reload();
+              }}
+            >
               <Icon name="refresh" />
               {t("dash.refresh")}
             </button>
@@ -171,45 +173,22 @@ export function Dashboard() {
               {t("dash.storageDegraded")}
             </div>
           )}
-          <div className={s.stats}>
-            {[
-              [t("dash.totalRequests"), metric(d.summary.requests), "arrow"],
-              [
-                t("dash.successRate"),
-                rate === null ? t("dash.storage.unknown") : `${(rate * 100).toFixed(1)}%`,
-                "shield",
-              ],
-              [t("dash.totalTokens"), metric(d.summary.total_tokens), "model"],
-              [t("dash.storage.credits"), metric(d.summary.credit), "leaf"],
-            ].map(([label, value, icon]) => (
-              <section className={s.stat} key={label}>
-                <div>
-                  {label}
-                  <span>
-                    <Icon name={icon} />
-                  </span>
-                </div>
-                <strong>{value}</strong>
-              </section>
-            ))}
-          </div>
+          <KpiCards summary={d.summary} previous={d.previous} series={d.series} />
+          <Panel title={t("dash.usageTrend")} hint={t("dash.usageTrendHint")} className={s.trend}>
+            {period.partial === true && (
+              <p className={s.note} role="status">
+                {t("dash.storagePartial")}
+              </p>
+            )}
+            <UsageTrend
+              rows={d.series}
+              hourlyRows={hourly.data?.series}
+              hourlyPartial={hourly.data?.range?.partial === true}
+              granularity={actualGrain}
+              partial={period.partial === true}
+            />
+          </Panel>
           <div className={s.dashboardGrid}>
-            <Panel
-              title={t("dash.trend")}
-              hint={t("dash.rangeHint", {
-                n: days,
-                grain:
-                  actualGrain === "hour" ? t("dash.granularityHour") : t("dash.granularityDay"),
-              })}
-              className={s.trend}
-            >
-              {period.partial === true && (
-                <p className={s.note} role="status">
-                  {t("dash.storagePartial")}
-                </p>
-              )}
-              <Trend rows={d.series} granularity={actualGrain} partial={period.partial === true} />
-            </Panel>
             <Panel title={t("dash.profileUsage")} hint={t("dash.granularityByRequests")}>
               {d.profiles.length ? (
                 <div className={s.distribution}>
@@ -237,7 +216,7 @@ export function Dashboard() {
             </Panel>
             <Panel title={t("dash.modelRank")}>
               {d.models.length ? (
-                <div className={s.tableWrap}>
+                <div className={`${s.tableWrap} ${s.panelScroll}`}>
                   <table>
                     <thead>
                       <tr>
@@ -271,49 +250,6 @@ export function Dashboard() {
             </Panel>
             <Panel title={t("dash.credentialHealth")}>
               <Health data={d.health} />
-            </Panel>
-            <Panel title={t("dash.storage")}>
-              <div className={s.storageOverview}>
-                <Badge
-                  tone={
-                    d.storage.degraded === true
-                      ? "bad"
-                      : d.storage.degraded === false
-                        ? "good"
-                        : "neutral"
-                  }
-                >
-                  {d.storage.degraded === true
-                    ? t("dash.storage.collectDegraded")
-                    : d.storage.degraded === false
-                      ? t("dash.status.normal")
-                      : t("dash.status.unknown")}
-                </Badge>
-                <span>
-                  {t("dash.storage.detailsLine", {
-                    used: bytes(d.storage.logical_bytes),
-                    max: bytes(d.storage.max_bytes),
-                  })}
-                </span>
-              </div>
-              <Fields
-                data={{
-                  数据库文件: bytes(d.storage.db_bytes),
-                  "WAL 文件": bytes(d.storage.wal_bytes),
-                  "SHM 文件": bytes(d.storage.shm_bytes),
-                  保留天数: metric(d.storage.retention_days),
-                  清理状态:
-                    d.storage.pending_cleanup === true
-                      ? t("dash.status.batch")
-                      : d.storage.pending_cleanup === false
-                        ? t("dash.status.done")
-                        : t("dash.storage.unknown"),
-                }}
-              />
-              <details className={s.chartData}>
-                <summary>{t("dash.storageDiagnose")}</summary>
-                <Fields data={d.storage} />
-              </details>
             </Panel>
             <Panel title={t("dash.balanceTitle")}>
               <p className={s.note}>{t("dash.balanceNote")}</p>

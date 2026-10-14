@@ -415,6 +415,26 @@ class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
                                   "credit": 0, "cache_read_input_tokens": 0, "reasoning_tokens": "3"})
         self.assertEqual(result, {"credit": 0, "cache_read_tokens": 0})
 
+    def test_usage_zero_alias_does_not_shadow_real_cache_counters(self):
+        # CodeBuddy ships a permanent top-level cached_tokens: 0 while the real
+        # hit count lives in prompt_tokens_details / prompt_cache_hit_tokens.
+        result = normalize_usage({"prompt_tokens": 552, "cached_tokens": 0,
+                                  "cache_read_input_tokens": 0,
+                                  "prompt_cache_hit_tokens": 448,
+                                  "prompt_cache_write_tokens": 104,
+                                  "completion_thinking_tokens": 5,
+                                  "prompt_tokens_details": {"cached_tokens": 448},
+                                  "completion_tokens_details": {"reasoning_tokens": 5}})
+        self.assertEqual(result["cache_read_tokens"], 448)
+        self.assertEqual(result["cache_creation_tokens"], 104)
+        self.assertEqual(result["reasoning_tokens"], 5)
+
+    def test_usage_anthropic_style_cache_fields_still_win(self):
+        result = normalize_usage({"cache_read_input_tokens": 1200,
+                                  "cache_creation_input_tokens": 300})
+        self.assertEqual(result["cache_read_tokens"], 1200)
+        self.assertEqual(result["cache_creation_tokens"], 300)
+
 
 class ClientMetaTests(unittest.TestCase):
     def scope(self, client=("203.0.113.7", 443), headers=()):

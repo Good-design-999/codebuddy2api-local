@@ -56,12 +56,12 @@ def _public_credential(item):
     fields = {"id", "account_key", "name", "filename", "enabled", "label", "profile", "region", "site",
               "uid", "nickname", "expires_at", "expiresAt", "health", "cooldown", "cooldowns", "credits",
               "credits_by_profile", "catalog", "catalog_sync", "sync", "generation", "auth_broken",
-              "models", "remaining", "enterprise_id", "product", "status", "sync_pending", "sync_error",
+              "models", "remaining", "enterprise_id", "enterprise", "enterpriseName", "product", "status", "sync_pending", "sync_error",
               "fail_until", "cooldown_until", "cooldown_remaining", "last_failure_at", "catalog_ready", "bindings",
               "auto_checkin", "auto_travel", "travel_supported", "checkin", "travel",
               "trial_supported", "trial",
               "daily_chat_supported", "auto_daily_chat", "daily_chat",
-              "token_expired", "token_expires_at", "last_refresh_time", "sessions", "sticky_sessions", "last_error_code"}
+              "token_expired", "token_expires_at", "last_refresh_time", "sessions", "sticky_sessions", "last_error_code", "usage_stats"}
     result = {key: value for key, value in item.items() if key in fields}
     identity = item.get("account_key") or item.get("id")
     if identity and ("/" in str(identity) or "\\" in str(identity)):
@@ -180,7 +180,21 @@ def install_admin(app, config, gateway):
         if (path, method) in (("/admin/oauth/start", "POST"), ("/admin/oauth/poll", "GET")):
             return await run_in_threadpool(oauth_dispatch, request)
         if path == "/admin/credentials" and method == "GET":
-            return JSONResponse({"credentials": [_public_credential(item) for item in await run_in_threadpool(inventory)]})
+            def list_credentials():
+                items = inventory()
+                stats_map = audit.credential_stats() if hasattr(audit, "credential_stats") else None
+                if not isinstance(stats_map, dict):
+                    stats_map = {}
+                out = []
+                for item in items:
+                    pub = _public_credential(item)
+                    if stats_map and "usage_stats" not in pub:
+                        stats = stats_map.get(pub.get("id")) or stats_map.get(pub.get("name"))
+                        if stats:
+                            pub["usage_stats"] = stats
+                    out.append(pub)
+                return out
+            return JSONResponse({"credentials": await run_in_threadpool(list_credentials)})
         if path.startswith("/admin/credentials/") and method == "DELETE":
             name = path.removeprefix("/admin/credentials/")
             if not _valid_name(name):
@@ -285,8 +299,14 @@ def install_admin(app, config, gateway):
                     rule = snapshot["models"].get(source, {"public_id": source, "enabled": True, "keep_original": False,
                                                            "region": None, "profile": None, "credential_ids": []})
                     models.append({**item, **rule})
-                return JSONResponse({"revision": snapshot["revision"], "models": models,
-                                     "model_capability_guard": config.get("model_capability_guard", True)})
+                resolved = {item["key"]: item for item in resolve_settings(config)}
+                return JSONResponse({
+                    "revision": snapshot["revision"], "models": models,
+                    "model_guard": config.get("model_guard", True),
+                    "model_guard_locked": bool(resolved.get("model_guard", {}).get("locked")),
+                    "model_capability_guard": config.get("model_capability_guard", True),
+                    "model_capability_guard_locked": bool(resolved.get("model_capability_guard", {}).get("locked")),
+                })
         return await run_in_threadpool(build_models)
 
     def checked_rule(source, data, *, creating=False):
@@ -512,6 +532,34 @@ def install_admin(app, config, gateway):
         result = await run_in_threadpool(audit.clear, scope)
         if isinstance(result, dict) and result.get("ok") is False:
             return error_response(503, "日志清理未完成，请检查审计存储状态")
+        return JSONResponse(result)
+
+    @route("GET", "/admin/storage")
+    async def storage_get(request):
+        result = await run_in_threadpool(audit.storage)
+        if result.get("degraded"):
+            return error_response(503, "存储状态暂时无法读取，请检查审计存储")
+        archives = []
+        try:
+            directory = Path(str(audit.path)).parent / "archives"
+            archives = sorted((entry.name for entry in directory.glob("audit-*.jsonl")), reverse=True)[:20]
+        except OSError as exc:
+            audit._fault(exc)
+            return error_response(503, "存储状态暂时无法读取，请检查审计存储")
+        return JSONResponse({**result, "archives": archives})
+
+    @route("POST", "/admin/storage/archive")
+    async def storage_archive(request):
+        body = await _body(request, 8192)
+        days = body.get("days")
+        if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 3650:
+            raise ValueError("归档窗口必须为 1 至 3650 天")
+        result = await run_in_threadpool(audit.archive, days)
+        if not result.get("ok"):
+            return error_response(503, "归档未完成，请检查审计存储状态")
+        event("storage_archive", {"days": days, "file": result.get("file"),
+                                  "requests": result.get("archived_requests"),
+                                  "events": result.get("archived_events")})
         return JSONResponse(result)
 
     @route("GET", "/admin/dashboard")

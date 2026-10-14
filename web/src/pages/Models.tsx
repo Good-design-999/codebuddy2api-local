@@ -493,16 +493,39 @@ function matchesCatalog(model: ModelRule, query: string, filter: CatalogFilter):
   return true;
 }
 export function Models() {
-  const resource = useResource("/models", modelResponse);
-  const credentials = useResource("/credentials", credentialResponse);
+  const resource = useResource("/models", modelResponse, { cache: true });
+  const credentials = useResource("/credentials", credentialResponse, { cache: true });
   const [query, setQuery] = useState("");
   const [detailsId, setDetailsId] = useState<string | null>(null);
   const detailed = resource.data?.models.find((model) => model.id === detailsId);
   const [editing, setEditing] = useState<ModelRule | null>(null);
   const [creating, setCreating] = useState(false);
+  const [editorRevision, setEditorRevision] = useState<number | null>(null);
   const [deleting, setDeleting] = useState<ModelRule | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [guardNotice, setGuardNotice] = useState<string | null>(null);
+  const toggleGuard = (key: "model_guard" | "model_capability_guard", next: boolean) => {
+    if (!resource.data || busy) return;
+    setBusy(true);
+    setError(null);
+    setGuardNotice(null);
+    void api
+      .patch("/settings", {
+        revision: resource.data.revision,
+        values: { [key]: next },
+      })
+      .then(() => {
+        setGuardNotice(
+          key === "model_capability_guard" && !next
+            ? "仅关闭新增能力预检；元数据展示、国际图片归并及其他安全限制不变，新请求生效。"
+            : `${key === "model_guard" ? "表外模型拦截" : "模型能力预检"}已${next ? "开启" : "关闭"}。`,
+        );
+        resource.reload();
+      })
+      .catch((err: unknown) => setError(errorMessage(err)))
+      .finally(() => setBusy(false));
+  };
   const [filter, setFilter] = useState<CatalogFilter>(emptyFilter);
   const [sort, setSort] = useState<SortKey>("catalog");
   const filtering = Boolean(
@@ -529,7 +552,10 @@ export function Models() {
             <button
               className={s.primary}
               disabled={!resource.data}
-              onClick={() => setCreating(true)}
+              onClick={() => {
+                setEditorRevision(resource.data?.revision ?? null);
+                setCreating(true);
+              }}
             >
               <Icon name="plus" />
               新增模型
@@ -538,7 +564,13 @@ export function Models() {
         }
       />
       <ResourceState {...resource} />
+      <ErrorNotice message={error} />
       <ErrorNotice message={credentials.error} retry={credentials.reload} />
+      {guardNotice && (
+        <p className={s.successNotice} role="status">
+          {guardNotice}
+        </p>
+      )}
       <Panel
         title="模型目录"
         hint={
@@ -621,14 +653,40 @@ export function Models() {
                 重置
               </button>
             )}
-            <Badge tone={resource.data?.model_capability_guard === false ? "warn" : "neutral"}>
-              能力预检：
-              {resource.data?.model_capability_guard === undefined
-                ? "未知"
-                : resource.data.model_capability_guard
-                  ? "开启"
-                  : "关闭"}
-            </Badge>
+            <label className={s.enableSwitch}>
+              <input
+                type="checkbox"
+                role="switch"
+                aria-label="表外模型拦截"
+                checked={resource.data?.model_guard !== false}
+                disabled={busy || !resource.data || resource.data.model_guard_locked === true}
+                onChange={(e) => toggleGuard("model_guard", e.target.checked)}
+              />
+              <span>表外拦截：{resource.data?.model_guard === false ? "关闭" : "开启"}</span>
+            </label>
+            <label className={s.enableSwitch}>
+              <input
+                type="checkbox"
+                role="switch"
+                aria-label="模型能力预检"
+                checked={resource.data?.model_capability_guard !== false}
+                disabled={
+                  busy ||
+                  !resource.data ||
+                  resource.data.model_capability_guard === undefined ||
+                  resource.data.model_capability_guard_locked === true
+                }
+                onChange={(e) => toggleGuard("model_capability_guard", e.target.checked)}
+              />
+              <span>
+                能力预检：
+                {resource.data?.model_capability_guard === undefined
+                  ? "未知"
+                  : resource.data.model_capability_guard
+                    ? "开启"
+                    : "关闭"}
+              </span>
+            </label>
           </div>
         </div>
         {rows &&
@@ -698,7 +756,14 @@ export function Models() {
                       <td>
                         <div className={s.rowActions}>
                           <button onClick={() => setDetailsId(m.id)}>模型详情</button>
-                          <button onClick={() => setEditing(m)}>编辑规则</button>
+                          <button
+                            onClick={() => {
+                              setEditorRevision(resource.data?.revision ?? null);
+                              setEditing(m);
+                            }}
+                          >
+                            编辑规则
+                          </button>
                           {m.custom && (
                             <button
                               className={s.textDanger}
@@ -737,10 +802,11 @@ export function Models() {
             creating={creating}
             models={resource.data.models}
             credentials={credentials.data}
-            revision={resource.data.revision}
+            revision={editorRevision ?? resource.data.revision}
             onClose={() => {
               setEditing(null);
               setCreating(false);
+              setEditorRevision(null);
             }}
             onSaved={resource.reload}
           />

@@ -8,6 +8,7 @@ export default defineConfig({
   workers: 1,
   use: {
     baseURL: "http://127.0.0.1:5175",
+    locale: "zh-CN",
     viewport: { width: 1440, height: 1050 },
     launchOptions: {
       executablePath: process.env.WEBUI_CHROMIUM,

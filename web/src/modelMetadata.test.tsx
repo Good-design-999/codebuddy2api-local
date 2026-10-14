@@ -13,7 +13,6 @@ import {
   specRange,
 } from "./modelMetadata";
 import { Models } from "./pages/Models";
-import { Settings } from "./pages/Settings";
 
 const model: ModelRule = {
   id: "upstream",
@@ -228,33 +227,28 @@ describe("effort and search summaries", () => {
   });
 });
 
-describe("capability guard settings", () => {
-  function settings(locked: boolean) {
+describe("capability guard settings on model routing", () => {
+  function modelsPayload(locked: boolean) {
     return {
       revision: 1,
-      audit: {},
-      items: [
-        {
-          key: "model_capability_guard",
-          value: true,
-          stored: null,
-          source: locked ? "environment" : "default",
-          mode: "hot",
-          type: "boolean",
-          label: "模型能力预检",
-          locked,
-        },
-      ],
+      models: [model],
+      model_guard: true,
+      model_guard_locked: locked,
+      model_capability_guard: true,
+      model_capability_guard_locked: locked,
     };
   }
 
   it("saves an explicit false without changing other settings", async () => {
-    vi.spyOn(api, "get").mockResolvedValue({ data: settings(false) });
+    vi.spyOn(api, "get").mockImplementation((url) =>
+      Promise.resolve({
+        data: url === "/models" ? modelsPayload(false) : { credentials: [] },
+      }),
+    );
     const save = vi.spyOn(api, "patch").mockResolvedValue({ data: { revision: 2 } });
-    render(<Settings />);
-    const toggle = await screen.findByRole("checkbox", { name: /模型能力预检/ });
+    render(<Models />);
+    const toggle = await screen.findByRole("switch", { name: /模型能力预检/ });
     fireEvent.click(toggle);
-    fireEvent.click(screen.getByRole("button", { name: "保存更改" }));
     await waitFor(() =>
       expect(save).toHaveBeenCalledWith("/settings", {
         revision: 1,
@@ -264,11 +258,16 @@ describe("capability guard settings", () => {
     expect(screen.getByText(/国际图片归并及其他安全限制不变/)).toBeTruthy();
   });
 
-  it("shows an environment-locked guard instead of an editable switch", async () => {
-    vi.spyOn(api, "get").mockResolvedValue({ data: settings(true) });
-    render(<Settings />);
-    await screen.findByText("外部锁定");
-    expect(screen.queryByRole("checkbox", { name: /模型能力预检/ })).toBeNull();
-    expect(screen.getByText("当前生效：开启")).toBeTruthy();
+  it("disables the switches when locked by external configuration", async () => {
+    vi.spyOn(api, "get").mockImplementation((url) =>
+      Promise.resolve({
+        data: url === "/models" ? modelsPayload(true) : { credentials: [] },
+      }),
+    );
+    render(<Models />);
+    const capSwitch = await screen.findByRole("switch", { name: /模型能力预检/ });
+    const guardSwitch = await screen.findByRole("switch", { name: /表外模型拦截/ });
+    expect(capSwitch).toHaveProperty("disabled", true);
+    expect(guardSwitch).toHaveProperty("disabled", true);
   });
 });

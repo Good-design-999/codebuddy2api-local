@@ -116,6 +116,7 @@ class AuditStore:
         self._validate(max_bytes, retention_days, preview_limit)
         self.max_bytes, self.retention_days, self.preview_limit = max_bytes, retention_days, preview_limit
         self._lock = threading.Lock()
+        self._archive_lock = threading.Lock()
         self._health_lock = threading.Lock()
         self.failure_count = self.dropped_records = 0
         self.failure_events: list[float] = []
@@ -555,18 +556,75 @@ class AuditStore:
             for row in series:
                 row["date"] = time.strftime("%Y-%m-%d %H:00" if grain == "hour" else "%Y-%m-%d", time.gmtime(row["bucket"]))
             summary["success_rate"] = summary["success"] / summary["requests"] if summary["requests"] else None
-            return {"summary": summary, "series": series,
+            previous = self._empty_stats()
+            for row in self._db.execute(
+                    "SELECT payload FROM stats_daily WHERE dimension='global' AND bucket>=? AND bucket<?",
+                    (start - days * 86400, start)).fetchall():
+                self._merge(previous, json.loads(row["payload"]))
+            previous["success_rate"] = previous["success"] / previous["requests"] if previous["requests"] else None
+            durations = sorted(r[0] for r in self._db.execute(
+                "SELECT json_extract(payload,'$.duration_ms') FROM requests WHERE started_at>=? AND started_at<=?",
+                (start, now)).fetchall() if r[0] is not None)
+            # Detail rows can be pruned, archived, or cleared independently of daily
+            # aggregates; only report P95 when the detail sample covers the period.
+            summary["p95_duration_ms"] = (
+                durations[max(0, math.ceil(len(durations) * 0.95) - 1)]
+                if durations and len(durations) >= summary["duration_ms_known"]
+                else None)
+            return {"summary": summary, "previous": previous, "series": series,
                     "models": [{"model": key, **value} for key, value in models.items()],
                     "profiles": [{"profile": key, **value} for key, value in profiles.items()],
                     "generated_at": now, "range": {**period, "partial": partial}}
-        return self._run(fetch, {"summary": self._empty_stats(), "series": [], "models": [], "profiles": [], "generated_at": now, "range": period, "degraded": True})
+        return self._run(fetch, {"summary": {**self._empty_stats(), "p95_duration_ms": None},
+                                 "previous": None, "series": [], "models": [], "profiles": [],
+                                 "generated_at": now, "range": period, "degraded": True})
+
+    def credential_stats(self):
+        def fetch():
+            out = {}
+            for row in self._db.execute(
+                    "SELECT dimension_key,payload FROM stats_totals WHERE dimension='credential' AND dimension_key!=''").fetchall():
+                stats = json.loads(row["payload"])
+                reqs = stats.get("requests") or 0
+                dur_known = stats.get("duration_ms_known") or 0
+                out[row["dimension_key"]] = {
+                    "requests": reqs,
+                    "success": stats.get("success") or 0,
+                    "error": stats.get("error") or 0,
+                    "success_rate": (stats.get("success") or 0) / reqs if reqs else None,
+                    "input_tokens": stats.get("input_tokens"),
+                    "output_tokens": stats.get("output_tokens"),
+                    "cache_read_tokens": stats.get("cache_read_tokens"),
+                    "total_tokens": stats.get("total_tokens"),
+                    "credit": stats.get("credit"),
+                    "avg_duration_ms": round((stats.get("duration_ms_sum") or 0) / dur_known, 1) if dur_known else None,
+                }
+            for row in self._db.execute(
+                    "SELECT credential,MAX(started_at) AS last_at,model,outcome,status_code "
+                    "FROM requests WHERE credential IS NOT NULL AND credential!='' GROUP BY credential").fetchall():
+                entry = out.setdefault(row["credential"], {
+                    "requests": 0, "success": 0, "error": 0, "success_rate": None,
+                    "input_tokens": None, "output_tokens": None, "cache_read_tokens": None,
+                    "total_tokens": None, "credit": None, "avg_duration_ms": None,
+                })
+                entry["last_request_at"] = row["last_at"]
+                entry["last_model"] = row["model"]
+                entry["last_outcome"] = row["outcome"]
+                entry["last_status_code"] = row["status_code"]
+            return out
+        return self._run(fetch, {})
     def storage(self):
         def fetch():
             self._prune()
             self._epoch = self._db.execute("SELECT epoch FROM state").fetchone()[0]
+            page_size = self._db.execute("PRAGMA page_size").fetchone()[0]
+            freelist = self._db.execute("PRAGMA freelist_count").fetchone()[0]
             return {**dict(self._db.execute("SELECT logical_bytes,request_count,event_count,ingest_count FROM detail_accounting WHERE id=1").fetchone()),
-                    "pending_cleanup": self._cleanup_pending()}
-        result = self._run(fetch, {"logical_bytes": None, "pending_cleanup": None}, write=True)
+                    "pending_cleanup": self._cleanup_pending(),
+                    "page_count": self._db.execute("PRAGMA page_count").fetchone()[0],
+                    "freelist_pages": freelist, "reclaimable_bytes": freelist * page_size}
+        result = self._run(fetch, {"logical_bytes": None, "pending_cleanup": None,
+                                   "reclaimable_bytes": None}, write=True)
         sizes = {}
         for key, suffix in (("db_bytes", ""), ("wal_bytes", "-wal"), ("shm_bytes", "-shm")):
             try:
@@ -602,6 +660,125 @@ class AuditStore:
             return {"ok": True, "scope": scope, "epoch": epoch, "aggregates_preserved": scope == "details"}
         return self._run(commit, {"ok": False, "scope": scope}, write=True,
                          on_commit=lambda result: setattr(self, "_epoch", result["epoch"]))
+
+    def archive(self, days):
+        if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 3650:
+            raise ValueError("invalid archive window")
+        cutoff = time.time() - days * 86400
+        if not self._archive_lock.acquire(timeout=0.25):
+            self._fault(TimeoutError())
+            return {"ok": False}
+        def step(callback, write=False):
+            if not self._lock.acquire(timeout=0.25):
+                raise TimeoutError()
+            try:
+                if self._closed:
+                    raise RuntimeError("closed")
+                deadline = time.monotonic() + 1
+                self._sql_deadline = deadline
+                self._db.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+                if write:
+                    self._db.execute("BEGIN IMMEDIATE")
+                result = callback()
+                if write:
+                    self._db.execute("COMMIT")
+                return result
+            except Exception:
+                if not self._closed:
+                    try:
+                        if self._db.in_transaction:
+                            self._db.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+                raise
+            finally:
+                if not self._closed:
+                    self._db.set_progress_handler(None, 0)
+                self._lock.release()
+        target = None
+        try:
+            has_old = step(lambda: (
+                self._db.execute("SELECT 1 FROM requests WHERE started_at<? LIMIT 1", (cutoff,)).fetchone()
+                or self._db.execute("SELECT 1 FROM events WHERE started_at<? LIMIT 1", (cutoff,)).fetchone()))
+            if not has_old:
+                return {"ok": True, "archived_requests": 0, "archived_events": 0, "file": None}
+            directory = Path(str(self.path)).parent / "archives"
+            directory.mkdir(mode=0o700, exist_ok=True)
+            name = f"audit-{time.strftime('%Y%m%d-%H%M%S', time.gmtime(cutoff))}-{uuid.uuid4().hex[:8]}.jsonl"
+            target = directory / name
+            tmp = target.with_suffix(".tmp")
+            request_ids: list[str] = []
+            event_ids: list[str] = []
+            try:
+                with open(tmp, "x", encoding="utf-8") as handle:
+                    # Short per-batch lock holds let live record_request/event calls
+                    # interleave within their 250ms lock budget while file I/O runs unlocked.
+                    last = (0.0, "")
+                    while True:
+                        rows = step(lambda last=last: self._db.execute(
+                            "SELECT id,started_at,model,profile,credential,outcome,status_code,payload,client_ip "
+                            "FROM requests WHERE started_at<? AND (started_at,id)>(?,?) "
+                            "ORDER BY started_at,id LIMIT 2000",
+                            (cutoff, *last)).fetchall())
+                        if not rows:
+                            break
+                        for row in rows:
+                            handle.write(json.dumps(
+                                {"kind": "request", "id": row[0], "started_at": row[1], "model": row[2],
+                                 "profile": row[3], "credential": row[4], "outcome": row[5],
+                                 "status_code": row[6], "payload": json.loads(row[7]), "client_ip": row[8]},
+                                ensure_ascii=False) + "\n")
+                            request_ids.append(row[0])
+                        last = (rows[-1][1], rows[-1][0])
+                    last = (0.0, "")
+                    while True:
+                        rows = step(lambda last=last: self._db.execute(
+                            "SELECT id,started_at,kind,action,payload FROM events "
+                            "WHERE started_at<? AND (started_at,id)>(?,?) ORDER BY started_at,id LIMIT 2000",
+                            (cutoff, *last)).fetchall())
+                        if not rows:
+                            break
+                        for row in rows:
+                            handle.write(json.dumps(
+                                {"kind": "event", "id": row[0], "started_at": row[1], "event_kind": row[2],
+                                 "action": row[3], "payload": json.loads(row[4])},
+                                ensure_ascii=False) + "\n")
+                            event_ids.append(row[0])
+                        last = (rows[-1][1], rows[-1][0])
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, target)
+                dir_fd = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except Exception:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                raise
+            # Delete only the exact exported detail rows in short slices; ingest dedup
+            # keys stay until _expire() prunes them at retention_days.
+            for sql, ids in (("DELETE FROM requests WHERE id=?", request_ids),
+                             ("DELETE FROM events WHERE id=?", event_ids)):
+                for i in range(0, len(ids), 500):
+                    params = [(item,) for item in ids[i:i + 500]]
+                    step(lambda sql=sql, params=params: self._db.executemany(sql, params), write=True)
+            return {"ok": True, "archived_requests": len(request_ids),
+                    "archived_events": len(event_ids), "file": name}
+        except Exception as exc:
+            if target is not None:
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+            self._fault(exc)
+            return {"ok": False}
+        finally:
+            self._archive_lock.release()
 
     def configure(self, max_bytes=None, retention_days=None, preview_limit=None):
         values = (self.max_bytes if max_bytes is None else max_bytes,

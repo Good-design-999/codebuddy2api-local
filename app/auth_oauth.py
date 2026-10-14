@@ -87,9 +87,11 @@ def validate_cred_data(data) -> tuple[str | None, str | None]:
     if not isinstance(data, dict):
         return None, "凭据不是有效的 JSON 对象"
     acct = data.get("account")
-    if not isinstance(acct, dict):
+    if not isinstance(acct, dict) or not acct:
+        # An empty ``account`` object must not hide a populated ``accounts[0]``.
         arr = data.get("accounts")
-        acct = arr[0] if isinstance(arr, list) and arr and isinstance(arr[0], dict) else None
+        candidate = arr[0] if isinstance(arr, list) and arr and isinstance(arr[0], dict) else None
+        acct = candidate if candidate else (acct if isinstance(acct, dict) else None)
     uid = str((acct or {}).get("uid") or "")
     if not uid:
         return None, "缺少 account.uid"

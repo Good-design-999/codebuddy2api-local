@@ -233,7 +233,7 @@ const TREND_SERIES = [
 const LEFT = 56,
   RIGHT_PAD = 140,
   TOP = 14,
-  BOTTOM = 172,
+  BOTTOM = 168,
   CHART_HEIGHT = 210;
 
 export function UsageTrend({
@@ -343,6 +343,17 @@ export function UsageTrend({
   const ticks = [0, 1, 2, 3, 4];
   return (
     <>
+      <div className={s.chartHead}>
+        <div className={s.chartLegend}>
+          {TREND_SERIES.map(({ key, labelKey, color }) => (
+            <span key={key}>
+              <i className={s.legendDot} style={{ background: color }} />
+              {t(labelKey)}
+            </span>
+          ))}
+        </div>
+        {bucketsValid && <span className={s.zoomHint}>{t("dash.zoomHint")}</span>}
+      </div>
       <div className={s.chartInteractive} ref={wrapRef}>
         <svg
           ref={svgRef}
@@ -379,6 +390,14 @@ export function UsageTrend({
             );
           }}
         >
+          <text x={LEFT} y={BOTTOM + 18} textAnchor="start">
+            {text(visible[0]?.date ?? rows[0].date)}
+          </text>
+          {rows.length > 1 && (
+            <text x={RIGHT} y={BOTTOM + 18} textAnchor="end">
+              {text(visible.at(-1)?.date ?? rows.at(-1)?.date)}
+            </text>
+          )}
           <clipPath id={`${id}-clip`}>
             <rect x={LEFT} y={0} width={RIGHT - LEFT} height={BOTTOM + 6} />
           </clipPath>
@@ -486,23 +505,10 @@ export function UsageTrend({
           </button>
         )}
       </div>
-      <div className={s.chartLegend}>
-        {TREND_SERIES.map(({ key, labelKey, color }) => (
-          <span key={key}>
-            <i className={s.legendDot} style={{ background: color }} />
-            {t(labelKey)}
-          </span>
-        ))}
-        {bucketsValid && <span className={s.zoomHint}>{t("dash.zoomHint")}</span>}
-      </div>
       <p className={s.srOnly} id={`${id}-hint`}>
         指向或点按查看时段；滚轮缩放区间，双击或 Esc 复位；键盘左右方向键逐点查看，Home 和 End
         跳到首尾。
       </p>
-      <div className={s.chartAxis}>
-        <span>{text(visible[0]?.date ?? rows[0].date)}</span>
-        {rows.length > 1 && <span>{text(visible.at(-1)?.date ?? rows.at(-1)?.date)}</span>}
-      </div>
       <details className={s.chartData}>
         <summary>{t("dash.trendData")}</summary>
         <table>

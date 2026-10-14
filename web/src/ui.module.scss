@@ -614,6 +614,16 @@ $white: var(--page);
   white-space: pre;
   margin: 8px 0;
 }
+.chartHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -4px 15px 2px;
+}
+.chartHead .zoomHint {
+  margin-left: 0;
+}
 .chartLegend {
   display: flex;
   gap: 18px;

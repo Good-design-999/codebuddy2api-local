@@ -122,6 +122,8 @@ export function Dashboard() {
   const [days, setDays] = useState("7");
   const [granularity, setGranularity] = useState("auto");
   const resource = useResource(`/dashboard?days=${days}&granularity=${granularity}`, normalize);
+  // Hourly buckets power the trend's zoom-in granularity swap.
+  const hourly = useResource(`/dashboard?days=${days}&granularity=hour`, normalize);
   const d = resource.data;
   const period = d?.range ?? {};
   const actualGrain = period.granularity === "hour" ? "hour" : "day";
@@ -175,6 +177,7 @@ export function Dashboard() {
             )}
             <UsageTrend
               rows={d.series}
+              hourlyRows={hourly.data?.series}
               granularity={actualGrain}
               partial={period.partial === true}
             />

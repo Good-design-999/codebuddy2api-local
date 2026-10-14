@@ -231,6 +231,7 @@ const TREND_SERIES = [
 ] as const;
 
 const LEFT = 56,
+  HOUR_STEP = 3600,
   RIGHT_PAD = 140,
   TOP = 14,
   BOTTOM = 168,
@@ -238,10 +239,12 @@ const LEFT = 56,
 
 export function UsageTrend({
   rows,
+  hourlyRows,
   granularity = "day",
   partial = false,
 }: {
   rows: RecordValue[];
+  hourlyRows?: RecordValue[];
   granularity?: string;
   partial?: boolean;
 }) {
@@ -264,7 +267,6 @@ export function UsageTrend({
   const RIGHT = Math.max(LEFT + 60, width - RIGHT_PAD);
   const [selection, setSelection] = useState<{ rows: RecordValue[]; index: number } | null>(null);
   const [zoom, setZoom] = useState<{ rows: RecordValue[]; domain: [number, number] } | null>(null);
-  const active = selection?.rows === rows ? selection.index : null;
   const domain = zoom?.rows === rows ? zoom.domain : null;
   const setDomain = (d: [number, number] | null) => setZoom(d ? { rows, domain: d } : null);
 
@@ -283,16 +285,14 @@ export function UsageTrend({
       e.preventDefault();
       const rect = el.getBoundingClientRect();
       if (!rect.width) return;
-      const frac = Math.min(
-        1,
-        Math.max(0, ((e.clientX - rect.left) * 780) / rect.width - LEFT) / (RIGHT - LEFT),
-      );
+      const frac = Math.min(1, Math.max(0, (e.clientX - rect.left - LEFT) / (RIGHT - LEFT)));
       setZoom((prev) => {
         const current = prev?.rows === rows ? prev.domain : null;
         const [ds, de] = current ?? [fullStart, fullEnd];
         const span = de - ds;
         const fullSpan = fullEnd - fullStart;
-        const next = Math.min(fullSpan, Math.max(step * 4, span * (e.deltaY < 0 ? 0.75 : 1.3)));
+        const minSpan = (hourlyRows?.length ? HOUR_STEP : step) * 4;
+        const next = Math.min(fullSpan, Math.max(minSpan, span * (e.deltaY < 0 ? 0.75 : 1.3)));
         if (next >= fullSpan) return null;
         const anchor = ds + frac * span;
         let start = anchor - frac * next;
@@ -308,17 +308,25 @@ export function UsageTrend({
     return <Empty title={partial ? t("trend.partialRange") : t("trend.emptyRange")} />;
 
   const [ds, de] = domain ?? [fullStart, fullEnd];
-  const visible = rows.filter((r) => {
+  // Zooming into a narrow window swaps in hourly buckets; zooming back out
+  // returns to the daily series, so the curve always uses fitting granularity.
+  const displayRows =
+    domain && granularity !== "hour" && hourlyRows?.length && de - ds <= 48 * HOUR_STEP
+      ? hourlyRows
+      : rows;
+  const displayStep = displayRows === rows ? step : HOUR_STEP;
+  const active = selection?.rows === displayRows ? selection.index : null;
+  const visible = displayRows.filter((r) => {
     const b = number(r.bucket);
-    return b === null || (b >= ds - step / 2 && b <= de + step / 2);
+    return b === null || (b >= ds - displayStep / 2 && b <= de + displayStep / 2);
   });
   const maxOf = (key: string) => Math.max(1, ...visible.map((r) => number(r[key]) ?? 0));
   const maxima: Record<string, number> = Object.fromEntries(
     TREND_SERIES.map(({ key }) => [key, maxOf(key)]),
   );
   const xAt = (index: number) => {
-    if (rows.length === 1) return (LEFT + RIGHT) / 2;
-    const b = number(rows[index].bucket);
+    if (displayRows.length === 1) return (LEFT + RIGHT) / 2;
+    const b = number(displayRows[index].bucket);
     if (bucketsValid && b !== null) return LEFT + ((b - ds) * (RIGHT - LEFT)) / (de - ds);
     return LEFT + (index * (RIGHT - LEFT)) / (rows.length - 1);
   };
@@ -333,13 +341,13 @@ export function UsageTrend({
     if (!rect.width) return;
     const x = ((event.clientX - rect.left) * width) / rect.width;
     let closest = 0;
-    for (let i = 1; i < rows.length; i++)
+    for (let i = 1; i < displayRows.length; i++)
       if (Math.abs(x - xAt(i)) < Math.abs(x - xAt(closest))) closest = i;
-    const tolerance = bucketsValid ? ((RIGHT - LEFT) * step) / (de - ds) / 2 : 30;
+    const tolerance = bucketsValid ? ((RIGHT - LEFT) * displayStep) / (de - ds) / 2 : 30;
     if (partial && Math.abs(x - xAt(closest)) > tolerance) setSelection(null);
     else choose(closest);
   };
-  const selected = active === null ? null : rows[active];
+  const selected = active === null ? null : displayRows[active];
   const ticks = [0, 1, 2, 3, 4];
   return (
     <>
@@ -362,7 +370,9 @@ export function UsageTrend({
           role="img"
           tabIndex={0}
           aria-label={
-            granularity === "hour" ? t("dash.usageTrend.hourly") : t("dash.usageTrend.daily")
+            displayRows !== rows || granularity === "hour"
+              ? t("dash.usageTrend.hourly")
+              : t("dash.usageTrend.daily")
           }
           aria-describedby={`${id}-hint${selected ? ` ${id}-tooltip` : ""}`}
           onPointerMove={pointer}
@@ -385,17 +395,17 @@ export function UsageTrend({
               e.key === "Home"
                 ? 0
                 : e.key === "End"
-                  ? rows.length - 1
+                  ? displayRows.length - 1
                   : (active ?? 0) + (e.key === "ArrowRight" ? 1 : -1),
             );
           }}
         >
           <text x={LEFT} y={BOTTOM + 18} textAnchor="start">
-            {text(visible[0]?.date ?? rows[0].date)}
+            {text(visible[0]?.date ?? displayRows[0].date)}
           </text>
-          {rows.length > 1 && (
+          {displayRows.length > 1 && (
             <text x={RIGHT} y={BOTTOM + 18} textAnchor="end">
-              {text(visible.at(-1)?.date ?? rows.at(-1)?.date)}
+              {text(visible.at(-1)?.date ?? displayRows.at(-1)?.date)}
             </text>
           )}
           <clipPath id={`${id}-clip`}>
@@ -426,7 +436,7 @@ export function UsageTrend({
             );
           })}
           <g clipPath={`url(#${id}-clip)`}>
-            {rows.length > 1 &&
+            {displayRows.length > 1 &&
               !partial &&
               TREND_SERIES.map(({ key, color }) => (
                 <path
@@ -440,10 +450,10 @@ export function UsageTrend({
                   strokeLinecap="round"
                 />
               ))}
-            {rows.length <= 62 &&
+            {displayRows.length <= 62 &&
               TREND_SERIES.map(({ key, color }) => (
                 <g key={key} data-series={key}>
-                  {rows.map((_, i) => (
+                  {displayRows.map((_, i) => (
                     <circle key={i} cx={xAt(i)} cy={yAt(key, i)} r="2" fill={color} />
                   ))}
                 </g>
@@ -514,14 +524,16 @@ export function UsageTrend({
         <table>
           <thead>
             <tr>
-              <th>{granularity === "hour" ? "时段（UTC）" : "日期（UTC）"}</th>
+              <th>
+                {displayRows !== rows || granularity === "hour" ? "时段（UTC）" : "日期（UTC）"}
+              </th>
               <th>{t("dash.kpi.requests")}</th>
               <th>{t("dash.kpi.totalTokens")}</th>
               <th>{t("dash.kpi.credit")}</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, i) => (
+            {displayRows.map((r, i) => (
               <tr key={i}>
                 <td>{text(r.date)}</td>
                 <td>{metric(r.requests)}</td>

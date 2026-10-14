@@ -1,4 +1,5 @@
 """Dashboard bucket regressions using isolated persistent aggregates."""
+import json
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -66,6 +67,40 @@ class GranularityTests(unittest.TestCase):
         self.assertEqual(result["series"], [])
         self.assertEqual(result["summary"]["requests"], 2)
         self.assertFalse(self.store.dashboard(1, "day")["range"]["partial"])
+
+
+class UnidentifiedModelTests(unittest.TestCase):
+    """Unidentified models must not surface as an anonymous bucket in the ranking."""
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.start = datetime(2026, 9, 14, tzinfo=timezone.utc).timestamp()
+        self.enterContext(patch("app.audit_store.time.time", return_value=self.start + 12.5 * 3600))
+        self.store = AuditStore(self.root / "logs.sqlite3")
+        self.addCleanup(self.store.close)
+
+    def _record(self, **overrides):
+        result = self.store.record_request({"id": "r1", **self.store.ticket(),
+            "started_at": self.start, "profile": "cn-cli", "protocol": "chat",
+            "status_code": 200, "outcome": "success", **overrides})
+        self.assertTrue(result["ok"])
+
+    def test_new_records_without_model_write_no_empty_bucket(self):
+        self._record()  # No public_model at all.
+        dash = self.store.dashboard(1)
+        self.assertEqual(dash["summary"]["requests"], 1)  # The global row still counts it.
+        self.assertEqual(dash["models"], [])
+
+    def test_legacy_empty_dimension_key_is_skipped(self):
+        self._record(public_model="synthetic-model")
+        stats = self.store._empty_stats()
+        stats["requests"] = 7
+        bucket = int(self.start // 86400) * 86400
+        self.store._db.execute("INSERT OR REPLACE INTO stats_daily VALUES(?,?,?,?)",
+                               (bucket, "model", "", json.dumps(stats)))
+        models = self.store.dashboard(1)["models"]
+        self.assertEqual([m["model"] for m in models], ["synthetic-model"])
+        self.assertEqual(models[0]["requests"], 1)  # The anonymous 7 are not merged anywhere.
 
 
 if __name__ == "__main__":

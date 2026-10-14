@@ -288,8 +288,11 @@ class AuditStore:
             increment[key + "_sum"] = record[key] or 0
             increment[key + "_known"] = int(record[key] is not None)
         dimensions = [("global", "")]
-        dimensions += [(key, record.get("public_model" if key == "model" else key) or "")
-                       for key in ("model", "profile", "credential")]
+        # Unknown model/profile/credential values get no bucket of their own: the global
+        # row still counts the request, and an empty key would rank as "未识别模型".
+        dimensions += [(key, value)
+                       for key in ("model", "profile", "credential")
+                       if (value := record.get("public_model" if key == "model" else key))]
         for table, seconds in (("stats_hourly", 3600), ("stats_daily", 86400), ("stats_totals", 0)):
             bucket = int(record["started_at"] // seconds) * seconds if seconds else 0
             for dimension, key in dimensions:
@@ -534,6 +537,10 @@ class AuditStore:
                     if grain == "day":
                         series.append({"bucket": row["bucket"], **stats})
                 elif row["dimension"] in ("model", "profile"):
+                    # Legacy rows recorded an empty key for unidentified models; skip
+                    # them instead of surfacing an anonymous bucket in the ranking.
+                    if not row["dimension_key"]:
+                        continue
                     target = models if row["dimension"] == "model" else profiles
                     self._merge(target.setdefault(row["dimension_key"], self._empty_stats()), stats)
             if grain == "hour":

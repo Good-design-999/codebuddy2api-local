@@ -234,7 +234,10 @@ export type ModelRule = {
 export function modelResponse(value: unknown): {
   revision: number;
   models: ModelRule[];
+  model_guard?: boolean;
+  model_guard_locked?: boolean;
   model_capability_guard?: boolean;
+  model_capability_guard_locked?: boolean;
 } {
   const data = object(value);
   if (typeof data.revision !== "number") throw new Error("模型响应缺少 revision");
@@ -266,8 +269,15 @@ export function modelResponse(value: unknown): {
   return {
     revision: data.revision,
     models,
+    model_guard: typeof data.model_guard === "boolean" ? data.model_guard : undefined,
+    model_guard_locked:
+      typeof data.model_guard_locked === "boolean" ? data.model_guard_locked : undefined,
     model_capability_guard:
       typeof data.model_capability_guard === "boolean" ? data.model_capability_guard : undefined,
+    model_capability_guard_locked:
+      typeof data.model_capability_guard_locked === "boolean"
+        ? data.model_capability_guard_locked
+        : undefined,
   };
 }
 export type Credential = RecordValue & { id: string; name: string | null };

@@ -100,6 +100,7 @@ function SettingsForm({
     ["system", "系统只读", []],
   ];
   for (const item of data.items) {
+    if (item.key === "model_guard" || item.key === "model_capability_guard") continue;
     if (!item.locked) groups[0][2].push(item);
     else if (["cli", "environment", "env", "dotenv"].includes(item.source)) groups[1][2].push(item);
     else groups[2][2].push(item);

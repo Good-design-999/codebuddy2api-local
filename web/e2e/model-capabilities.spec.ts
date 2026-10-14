@@ -132,19 +132,16 @@ for (const width of [1440, 375]) {
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
     await expect(trigger).toBeFocused();
-    await page.goto("/dashboard/settings");
-    const toggle = page.getByRole("checkbox", { name: /模型能力预检/ });
+    const toggle = page.getByRole("switch", { name: /模型能力预检/ });
     await expect(toggle).toBeChecked();
-    await toggle.uncheck();
     const saved = page.waitForResponse(
       (response) =>
         response.url().endsWith("/admin/settings") && response.request().method() === "PATCH",
     );
-    await page.getByRole("button", { name: "保存更改" }).click();
+    await toggle.click();
     expect((await saved).status()).toBe(200);
     await expect(toggle).not.toBeChecked();
     await expect(page.getByText(/国际图片归并及其他安全限制不变/)).toBeVisible();
-    await page.goto("/dashboard/models");
     await expect(page.getByText("能力预检：关闭")).toBeVisible();
     await expect(page.getByText("图片因路由而异")).toBeVisible();
     expect(external).toEqual([]);

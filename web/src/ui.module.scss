@@ -512,20 +512,23 @@ $white: var(--page);
   display: flex;
 }
 .zoomReset {
-  position: absolute;
-  top: 4px;
-  right: 8px;
-  font-size: 10px;
-  padding: 3px 10px;
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 5px 14px;
   border-radius: 999px;
   border: 1px solid var(--line);
   background: var(--surface);
-  color: var(--muted);
+  color: var(--text);
   cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    color 0.15s ease,
+    box-shadow 0.15s ease;
 }
 .zoomReset:hover {
   color: var(--accent);
   border-color: var(--accent);
+  box-shadow: 0 2px 10px var(--shadow);
 }
 .moreMenu {
   position: relative;
@@ -986,8 +989,12 @@ $white: var(--page);
   padding: 26px 28px 42px;
 }
 .drawerBody > .panel,
-.drawerBody form + .panel {
+.drawerBody form + .panel,
+.drawerBody section + section {
   margin-top: 22px;
+}
+.drawerBody .panel + .panel {
+  margin-top: 14px;
 }
 .field {
   display: flex;

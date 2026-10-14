@@ -310,10 +310,15 @@ export function UsageTrend({
   const [ds, de] = domain ?? [fullStart, fullEnd];
   // Zooming into a narrow window swaps in hourly buckets; zooming back out
   // returns to the daily series, so the curve always uses fitting granularity.
+  const hourlyInWindow =
+    domain && granularity !== "hour" && hourlyRows?.length
+      ? hourlyRows.filter((r) => {
+          const b = number(r.bucket);
+          return b === null || (b >= ds - HOUR_STEP / 2 && b <= de + HOUR_STEP / 2);
+        }).length
+      : 0;
   const displayRows =
-    domain && granularity !== "hour" && hourlyRows?.length && de - ds <= 48 * HOUR_STEP
-      ? hourlyRows
-      : rows;
+    domain && de - ds <= 48 * HOUR_STEP && hourlyInWindow >= 4 ? (hourlyRows ?? rows) : rows;
   const displayStep = displayRows === rows ? step : HOUR_STEP;
   const active = selection?.rows === displayRows ? selection.index : null;
   const visible = displayRows.filter((r) => {
@@ -360,7 +365,13 @@ export function UsageTrend({
             </span>
           ))}
         </div>
-        {bucketsValid && <span className={s.zoomHint}>{t("dash.zoomHint")}</span>}
+        {domain ? (
+          <button type="button" className={s.zoomReset} onClick={() => setDomain(null)}>
+            {t("dash.zoomReset")}
+          </button>
+        ) : (
+          bucketsValid && <span className={s.zoomHint}>{t("dash.zoomHint")}</span>
+        )}
       </div>
       <div className={s.chartInteractive} ref={wrapRef}>
         <svg
@@ -437,7 +448,7 @@ export function UsageTrend({
           })}
           <g clipPath={`url(#${id}-clip)`}>
             {displayRows.length > 1 &&
-              !partial &&
+              (!partial || displayRows !== rows) &&
               TREND_SERIES.map(({ key, color }) => (
                 <path
                   key={key}
@@ -450,7 +461,7 @@ export function UsageTrend({
                   strokeLinecap="round"
                 />
               ))}
-            {displayRows.length <= 62 &&
+            {visible.length <= 62 &&
               TREND_SERIES.map(({ key, color }) => (
                 <g key={key} data-series={key}>
                   {displayRows.map((_, i) => (
@@ -508,11 +519,6 @@ export function UsageTrend({
               ))}
             </dl>
           </div>
-        )}
-        {domain && (
-          <button type="button" className={s.zoomReset} onClick={() => setDomain(null)}>
-            {t("dash.zoomReset")}
-          </button>
         )}
       </div>
       <p className={s.srOnly} id={`${id}-hint`}>

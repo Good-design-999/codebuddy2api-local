@@ -510,7 +510,11 @@ export function Credentials() {
                           )}
                         </td>
                         <td>
-                          {balance ? metric(balance.credits ?? balance.remaining) : "未知"}
+                          {balance
+                            ? balance.unlimited && balance.enterprise
+                              ? "无限"
+                              : metric(balance.credits ?? balance.remaining)
+                            : "未知"}
                           <small>
                             {c.token_expires_at !== undefined
                               ? expiry(c.token_expires_at, true)

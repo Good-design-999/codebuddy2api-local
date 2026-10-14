@@ -10,6 +10,8 @@ the guarantee that a personal account keeps using the personal endpoint.
 import base64
 import json
 import sys
+import tempfile
+import time
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
@@ -19,6 +21,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # Allow direct execution.
 
 from app import credits
+import converter
 from app.client_profiles import (
     CLI_USER_AGENT, enterprise_id_of, is_enterprise_account,
 )
@@ -309,6 +312,110 @@ class EnterpriseIdResolutionTests(TestCase):
             with _patch_client(failing):
                 self.assertIsNone(credits.resolve_enterprise_id(CN_TOKEN, uid="u",
                                                                 domain="www.codebuddy.cn"))
+
+
+class UnlimitedLedgerTests(TestCase):
+    """The unlimited marker only survives storage when it came from the enterprise dispatch."""
+
+    def _snapshot(self, td, cred_id, result):
+        ledger = credits.CreditLedger(Path(td) / "ledger.json")
+        ledger.update_credits(cred_id, result)
+        return ledger.snapshot()[cred_id]["credits"]
+
+    def test_unlimited_enterprise_flags_are_stored(self):
+        with tempfile.TemporaryDirectory() as td:
+            stored = self._snapshot(td, "ent", {"credits": None, "count": 0, "segments": [],
+                                                "soonest_expiry": None, "intl": False,
+                                                "unlimited": True, "enterprise": True})
+        self.assertIsNone(stored["credits"])
+        self.assertTrue(stored["enterprise"])
+        self.assertTrue(stored["unlimited"])
+
+    def test_personal_result_can_never_store_unlimited(self):
+        # Even a malformed personal result carrying the marker cannot pass the gate.
+        with tempfile.TemporaryDirectory() as td:
+            stored = self._snapshot(td, "p1", {"credits": 5.0, "count": 1, "segments": [],
+                                               "soonest_expiry": None, "intl": False,
+                                               "unlimited": True})
+            plain = self._snapshot(td, "p2", {"credits": 5.0, "count": 1, "segments": [],
+                                              "soonest_expiry": None, "intl": False})
+        self.assertFalse(stored["unlimited"])
+        self.assertFalse(stored["enterprise"])
+        self.assertFalse(plain["unlimited"])
+        self.assertFalse(plain["enterprise"])
+
+
+class UnlimitedAggregateTests(TestCase):
+    """Unlimited enterprise tenants stay out of the monetary conversion."""
+
+    def _entry(self, identity, balance):
+        return {"identity": identity, "credits": balance}
+
+    def test_unlimited_enterprise_is_counted_not_converted(self):
+        snap = {
+            "ent": self._entry("i-ent", {"credits": None, "segments": [], "intl": False,
+                                         "partial": False, "unlimited": True, "enterprise": True}),
+            "p1": self._entry("i-p1", {"credits": 10.0, "intl": False, "partial": False,
+                                       "segments": [{"remaining": 10.0, "total": 20.0,
+                                                     "expires_at": None}]}),
+        }
+        agg = credits.aggregate_credits(snap)
+        self.assertEqual(agg["unlimited_accounts"], 1)
+        self.assertEqual(agg["remaining"], 10.0)
+        self.assertEqual(agg["groups"]["domestic"]["remaining"], 10.0)
+
+    def test_marker_without_enterprise_still_counts_numerically(self):
+        # The double gate: unlimited without enterprise is not honored anywhere.
+        snap = {"x": self._entry("i-x", {"credits": 3.0, "intl": False, "partial": False,
+                                         "unlimited": True, "enterprise": False,
+                                         "segments": [{"remaining": 3.0, "total": 3.0,
+                                                       "expires_at": None}]})}
+        agg = credits.aggregate_credits(snap)
+        self.assertEqual(agg["unlimited_accounts"], 0)
+        self.assertEqual(agg["remaining"], 3.0)
+
+
+class UnlimitedRoutingTests(TestCase):
+    """An unlimited enterprise tenant is routable; zero-balance restriction still applies otherwise."""
+
+    def _pool(self, td):
+        path = Path(td) / "cred.info"
+        path.write_text(json.dumps({
+            "auth": {"accessToken": "t", "expiresAt": int(time.time() * 1000) + 86400000},
+            "account": {"uid": "u1"}}), encoding="utf-8")
+        pool = converter.CredentialPool([path])
+        ledger = credits.CreditLedger(Path(td) / "ledger.json")
+        pool.set_ledger(ledger)
+        entry = pool.entries()[0]
+        return pool, ledger, entry, entry["profile"]
+
+    def test_unlimited_enterprise_is_never_zero_balance(self):
+        with tempfile.TemporaryDirectory() as td:
+            pool, ledger, entry, profile = self._pool(td)
+            ledger.update_credits(entry["id"], {"credits": None, "count": 0, "segments": [],
+                                                "soonest_expiry": None, "intl": False,
+                                                "unlimited": True, "enterprise": True})
+            self.assertFalse(pool._zero_balance(entry, profile))
+            self.assertTrue(pool._has_credit(entry, profile))
+
+    def test_zero_balance_personal_account_stays_restricted(self):
+        with tempfile.TemporaryDirectory() as td:
+            pool, ledger, entry, profile = self._pool(td)
+            ledger.update_credits(entry["id"], {"credits": 0, "count": 0, "segments": [],
+                                                "soonest_expiry": None, "intl": False})
+            self.assertTrue(pool._zero_balance(entry, profile))
+            self.assertFalse(pool._has_credit(entry, profile))
+
+    def test_smuggled_unlimited_marker_keeps_zero_balance_rules(self):
+        # The ledger gate drops unlimited without enterprise; a number-less personal
+        # balance is still zero, so the restriction cannot be bypassed.
+        with tempfile.TemporaryDirectory() as td:
+            pool, ledger, entry, profile = self._pool(td)
+            ledger.update_credits(entry["id"], {"credits": None, "count": 0, "segments": [],
+                                                "soonest_expiry": None, "intl": False,
+                                                "unlimited": True})
+            self.assertTrue(pool._zero_balance(entry, profile))
+            self.assertFalse(pool._has_credit(entry, profile))
 
 
 if __name__ == "__main__":

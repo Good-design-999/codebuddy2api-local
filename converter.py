@@ -967,6 +967,9 @@ class CredentialPool:
         if not balance:
             return False
         try:
+            # An unlimited enterprise tenant holds no numeric balance and is never zero.
+            if balance.get("unlimited") and balance.get("enterprise"):
+                return False
             return (bool(balance.get("intl")) == (profile_region(profile) == "intl")
                     and float(balance.get("credits") or 0) <= 0)
         except (TypeError, ValueError):
@@ -977,6 +980,9 @@ class CredentialPool:
         if not balance:
             return profile_region(profile) == "cn"
         try:
+            # An unlimited enterprise tenant holds no numeric balance; it has credit on its own site.
+            if balance.get("unlimited") and balance.get("enterprise"):
+                return bool(balance.get("intl")) == (profile_region(profile) == "intl")
             return (bool(balance.get("intl")) == (profile_region(profile) == "intl")
                     and float(balance.get("credits") or 0) > 0)
         except (TypeError, ValueError):
@@ -1580,7 +1586,8 @@ def _sync_credits(pool, ledger, entry, *, checkin, failed, expected_identity=Non
         if not pool.apply_if_current(cm, generation, lambda: ledger.update_credits(cid, balance)):
             failed.add(cid)
             return None
-        _log(f"[credits] {Path(cid).name}: 站点 {site}，余额 {balance['credits']}")
+        shown = "无限" if balance.get("unlimited") and balance.get("enterprise") else balance["credits"]
+        _log(f"[credits] {Path(cid).name}: 站点 {site}，余额 {shown}")
         profile = profile_for_headers(headers)
         return entry, generation, headers, profile
     except Exception as error:
@@ -2418,6 +2425,8 @@ def _billing_totals() -> dict:
             "used_source": "official_usage_detail" if detail else "quota_delta",
             # Expose incomplete pagination or failed account synchronization.
             "partial": bool(agg.get("partial") or cache.get("partial")),
+            # Unlimited enterprise tenants stay outside the monetary conversion.
+            "unlimited_accounts": int(agg.get("unlimited_accounts") or 0),
             "groups": groups_out, "by_day": cache.get("by_day") or {}}
 
 
@@ -2664,9 +2673,16 @@ def _profile_has_credits(profile: str) -> bool:
         if profile_region(profile) == "cn":
             return True
         ledger = CONFIG.get("ledger")
-        return bool(ledger and any((entry.get("credits") or {}).get("intl")
-                                   and float((entry.get("credits") or {}).get("credits") or 0) > 0
-                                   for entry in ledger.snapshot().values()))
+
+        def _positive(entry):
+            c = entry.get("credits") or {}
+            if not c.get("intl"):
+                return False
+            if c.get("unlimited") and c.get("enterprise"):
+                return True  # Unlimited tenants hold no numeric balance.
+            return float(c.get("credits") or 0) > 0
+
+        return bool(ledger and any(_positive(entry) for entry in ledger.snapshot().values()))
     return any(pool._entry_profile(entry) == profile and pool._has_credit(entry, profile)
                for entry in pool.entries() if model_policy.credential_enabled(CONFIG, entry))
 

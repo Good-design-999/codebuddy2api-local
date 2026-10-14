@@ -698,11 +698,20 @@ def dedupe_by_identity(creds_snapshot: dict) -> dict:
 
 
 def aggregate_credits(creds_snapshot: dict) -> dict:
-    """Deduplicate accounts and aggregate regional balances, usage and earliest expiry."""
+    """Deduplicate accounts and aggregate regional balances, usage and earliest expiry.
+
+    Unlimited enterprise tenants carry no numeric balance: they are counted
+    separately instead of entering the monetary conversion.
+    """
     groups = {k: {"remaining": 0.0, "used_by_quota": 0.0, "soonest_expiry": None}
               for k in ("domestic", "international")}
-    for e in dedupe_by_identity(creds_snapshot).values():
+    deduped = dedupe_by_identity(creds_snapshot)
+    unlimited = 0
+    for e in deduped.values():
         c = e.get("credits") or {}
+        if c.get("unlimited") and c.get("enterprise"):
+            unlimited += 1
+            continue
         g = groups["international" if c.get("intl") else "domestic"]
         for s in c.get("segments") or []:
             rem = float(s.get("remaining") or 0)
@@ -719,7 +728,8 @@ def aggregate_credits(creds_snapshot: dict) -> dict:
             "used_by_quota": round(sum(g["used_by_quota"] for g in groups.values()), 2),
             "soonest_expiry": min(exps) if exps else None,
             "partial": any(bool((e.get("credits") or {}).get("partial"))
-                           for e in dedupe_by_identity(creds_snapshot).values()),
+                           for e in deduped.values()),
+            "unlimited_accounts": unlimited,
             "groups": groups}
 
 
@@ -869,6 +879,10 @@ class CreditLedger:
                 "fetched_at": time.time(),
                 "intl": bool(result.get("intl")),  # Regional credits use independent pricing.
                 "partial": bool(result.get("partial")),  # Expose incomplete pagination.
+                "enterprise": bool(result.get("enterprise")),
+                # Unlimited only exists on the enterprise dispatch; the double gate keeps a
+                # malformed personal result from ever storing it and bypassing zero-balance rules.
+                "unlimited": bool(result.get("unlimited")) and bool(result.get("enterprise")),
             }
             e["error"] = None
             self._save()

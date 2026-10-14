@@ -88,3 +88,26 @@ describe("dashboard granularity", () => {
     expect(chart.querySelector("polyline")).toBeNull();
   });
 });
+
+describe("official credits", () => {
+  it("shows an unlimited enterprise tenant without a numeric balance", async () => {
+    vi.spyOn(api, "get").mockResolvedValue({
+      data: {
+        summary: { requests: 0, success_rate: 1, total_tokens: null, credit: null },
+        series: [],
+        models: [],
+        profiles: [],
+        health: { credentials: [] },
+        storage: {},
+        range: { granularity: "day" },
+        official_credits: {
+          "ent.info": { name: "ent", credits: { credits: null, unlimited: true, enterprise: true } },
+          "p1.info": { name: "p1", credits: { credits: 12.5 } },
+        },
+      },
+    });
+    render(<Dashboard />);
+    expect(await screen.findByText("无限")).toBeTruthy();
+    expect(screen.getByText("12.5")).toBeTruthy();
+  });
+});

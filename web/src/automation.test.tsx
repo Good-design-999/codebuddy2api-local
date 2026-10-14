@@ -7,7 +7,7 @@ import { TravelSummary } from "./Travel";
 function openRowMenu(credentialName: string) {
   const row = screen
     .getAllByText(credentialName)
-    .map((el) => el.closest("tr"))
+    .map((el) => el.closest<HTMLElement>("tr, article"))
     .find((tr) => tr && within(tr).queryByRole("button", { name: /^更多/ }));
   if (!row) throw new Error(`row for ${credentialName} not found`);
   fireEvent.click(within(row).getByRole("button", { name: /^更多/ }));
@@ -62,8 +62,15 @@ it("renders server preferences, allows international checkin opt-in, but never o
   });
   const post = vi.spyOn(api, "post");
   render(<Credentials />);
+  fireEvent.click(screen.getByRole("button", { name: "任务配置 cn.info" }));
   expect(screen.getByRole("switch", { name: "自动签到 cn.info" })).toHaveProperty("checked", true);
   expect(screen.getByRole("switch", { name: "自动旅行 cn.info" })).toHaveProperty("checked", true);
+  // The daily turn is international-only, so the domestic switch is shown but unusable.
+  expect(screen.getByRole("switch", { name: "自动活跃打卡 cn.info" })).toHaveProperty(
+    "disabled",
+    true,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "任务配置 intl.info" }));
   expect(screen.getByRole("switch", { name: "自动签到 intl.info" })).toHaveProperty(
     "checked",
     false,
@@ -73,11 +80,6 @@ it("renders server preferences, allows international checkin opt-in, but never o
     true,
   );
   expect(screen.queryByRole("button", { name: "旅行领派 intl.info" })).toBeNull();
-  // The daily turn is international-only, so the domestic switch is shown but unusable.
-  expect(screen.getByRole("switch", { name: "自动活跃打卡 cn.info" })).toHaveProperty(
-    "disabled",
-    true,
-  );
   expect(screen.getByRole("switch", { name: "自动活跃打卡 intl.info" })).toHaveProperty(
     "checked",
     false,
@@ -100,6 +102,7 @@ it("renders server preferences, allows international checkin opt-in, but never o
   );
   expect(patch).toHaveBeenLastCalledWith("/credentials/intl", { auto_daily_chat: true });
   expect(post).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "任务配置 cn.info" }));
   await act(async () => fireEvent.click(screen.getByRole("switch", { name: "自动旅行 cn.info" })));
   expect(patch).toHaveBeenLastCalledWith("/credentials/cn", { auto_travel: false });
   expect(screen.getByRole("switch", { name: "自动签到 cn.info" })).toHaveProperty("checked", true);
@@ -110,6 +113,7 @@ it("does not pretend a failed or malformed save succeeded", async () => {
   fixture();
   const patch = vi.spyOn(api, "patch").mockResolvedValue({ data: { id: "intl", revision: 1 } });
   render(<Credentials />);
+  fireEvent.click(screen.getByRole("button", { name: "任务配置 intl.info" }));
   await act(async () =>
     fireEvent.click(screen.getByRole("switch", { name: "自动签到 intl.info" })),
   );
@@ -119,6 +123,7 @@ it("does not pretend a failed or malformed save succeeded", async () => {
     false,
   );
   patch.mockRejectedValueOnce(new Error("network unavailable"));
+  fireEvent.click(screen.getByRole("button", { name: "任务配置 cn.info" }));
   await act(async () => fireEvent.click(screen.getByRole("switch", { name: "自动旅行 cn.info" })));
   expect(screen.getByRole("switch", { name: "自动旅行 cn.info" })).toHaveProperty("checked", true);
 });
@@ -153,6 +158,7 @@ it("keeps manual checkin and travel separate from the automation preference writ
     );
   }
   expect(screen.getByText("部分完成")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "任务配置 intl.info" }));
   expect(screen.getByText(/签到活动未开放或已结束/)).toBeTruthy();
 });
 
@@ -187,6 +193,7 @@ it("disables switches when an older backend omits them and rejects malformed typ
     error: null,
   });
   render(<Credentials />);
+  fireEvent.click(screen.getByRole("button", { name: "任务配置 old.info" }));
   expect(screen.getByRole("switch", { name: "自动签到 old.info" })).toHaveProperty(
     "disabled",
     true,

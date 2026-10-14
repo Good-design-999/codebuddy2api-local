@@ -123,15 +123,18 @@ test("credential refresh, checkin, sync and batch buttons stay separate", async 
   const calls = await fixture(page);
   await page.goto("/dashboard/credentials");
   for (const label of [
-    "刷新凭证 one.info",
+    "menu:刷新凭证 one.info",
     "menu:签到 one.info",
     "同步余额 one.info",
-    "批量签到",
+    "batch:批量签到",
     "同步全部余额",
   ]) {
     if (label.startsWith("menu:")) {
       await page.getByRole("button", { name: "更多 one.info" }).click();
       await page.getByRole("button", { name: label.slice(5), exact: true }).click();
+    } else if (label.startsWith("batch:")) {
+      await page.getByRole("button", { name: "批量操作" }).click();
+      await page.getByRole("button", { name: label.slice(6), exact: true }).click();
     } else {
       await page.getByRole("button", { name: label, exact: true }).click();
     }

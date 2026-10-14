@@ -229,6 +229,7 @@ test("credential OAuth terminates, upload/export and safe-name deletion are wire
   await page.waitForTimeout(4500);
   expect(mock.getPolls()).toBe(1);
   await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "批量操作" }).click();
   await page.getByRole("button", { name: "导入文件" }).click();
   await page.getByLabel("选择 .info 或 ZIP").setInputFiles({
     name: "import.info",

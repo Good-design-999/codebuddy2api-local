@@ -578,6 +578,41 @@ class AuditStore:
         return self._run(fetch, {"summary": {**self._empty_stats(), "p95_duration_ms": None},
                                  "previous": None, "series": [], "models": [], "profiles": [],
                                  "generated_at": now, "range": period, "degraded": True})
+
+    def credential_stats(self):
+        def fetch():
+            out = {}
+            for row in self._db.execute(
+                    "SELECT dimension_key,payload FROM stats_totals WHERE dimension='credential' AND dimension_key!=''").fetchall():
+                stats = json.loads(row["payload"])
+                reqs = stats.get("requests") or 0
+                dur_known = stats.get("duration_ms_known") or 0
+                out[row["dimension_key"]] = {
+                    "requests": reqs,
+                    "success": stats.get("success") or 0,
+                    "error": stats.get("error") or 0,
+                    "success_rate": (stats.get("success") or 0) / reqs if reqs else None,
+                    "input_tokens": stats.get("input_tokens"),
+                    "output_tokens": stats.get("output_tokens"),
+                    "cache_read_tokens": stats.get("cache_read_tokens"),
+                    "total_tokens": stats.get("total_tokens"),
+                    "credit": stats.get("credit"),
+                    "avg_duration_ms": round((stats.get("duration_ms_sum") or 0) / dur_known, 1) if dur_known else None,
+                }
+            for row in self._db.execute(
+                    "SELECT credential,MAX(started_at) AS last_at,model,outcome,status_code "
+                    "FROM requests WHERE credential IS NOT NULL AND credential!='' GROUP BY credential").fetchall():
+                entry = out.setdefault(row["credential"], {
+                    "requests": 0, "success": 0, "error": 0, "success_rate": None,
+                    "input_tokens": None, "output_tokens": None, "cache_read_tokens": None,
+                    "total_tokens": None, "credit": None, "avg_duration_ms": None,
+                })
+                entry["last_request_at"] = row["last_at"]
+                entry["last_model"] = row["model"]
+                entry["last_outcome"] = row["outcome"]
+                entry["last_status_code"] = row["status_code"]
+            return out
+        return self._run(fetch, {})
     def storage(self):
         def fetch():
             self._prune()
@@ -600,8 +635,7 @@ class AuditStore:
                 self._fault(exc)
                 sizes[key] = None
         recent = self._recent_failures()
-        return {**result, **sizes, "db_path": str(self.path), "max_bytes": self.max_bytes,
-                "retention_days": self.retention_days,
+        return {**result, **sizes, "max_bytes": self.max_bytes, "retention_days": self.retention_days,
                 "preview_limit": self.preview_limit, "schema_version": SCHEMA_VERSION, "epoch": self._epoch,
                 "degraded": bool(recent), "recent_failures": recent, "failure_count": self.failure_count,
                 "dropped_records": self.dropped_records, "last_error": self.last_error,
@@ -728,12 +762,11 @@ class AuditStore:
                 raise
             # Delete only the exact exported detail rows in short slices; ingest dedup
             # keys stay until _expire() prunes them at retention_days.
-            for table, ids in (("requests", request_ids), ("events", event_ids)):
+            for sql, ids in (("DELETE FROM requests WHERE id=?", request_ids),
+                             ("DELETE FROM events WHERE id=?", event_ids)):
                 for i in range(0, len(ids), 500):
-                    chunk = ids[i:i + 500]
-                    marks = ",".join("?" * len(chunk))
-                    step(lambda table=table, marks=marks, chunk=chunk: self._db.execute(
-                        f"DELETE FROM {table} WHERE id IN ({marks})", chunk), write=True)
+                    params = [(item,) for item in ids[i:i + 500]]
+                    step(lambda sql=sql, params=params: self._db.executemany(sql, params), write=True)
             return {"ok": True, "archived_requests": len(request_ids),
                     "archived_events": len(event_ids), "file": name}
         except Exception as exc:

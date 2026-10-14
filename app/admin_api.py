@@ -56,12 +56,12 @@ def _public_credential(item):
     fields = {"id", "account_key", "name", "filename", "enabled", "label", "profile", "region", "site",
               "uid", "nickname", "expires_at", "expiresAt", "health", "cooldown", "cooldowns", "credits",
               "credits_by_profile", "catalog", "catalog_sync", "sync", "generation", "auth_broken",
-              "models", "remaining", "enterprise_id", "product", "status", "sync_pending", "sync_error",
+              "models", "remaining", "enterprise_id", "enterprise", "enterpriseName", "product", "status", "sync_pending", "sync_error",
               "fail_until", "cooldown_until", "cooldown_remaining", "last_failure_at", "catalog_ready", "bindings",
               "auto_checkin", "auto_travel", "travel_supported", "checkin", "travel",
               "trial_supported", "trial",
               "daily_chat_supported", "auto_daily_chat", "daily_chat",
-              "token_expired", "token_expires_at", "last_refresh_time", "sessions", "sticky_sessions", "last_error_code"}
+              "token_expired", "token_expires_at", "last_refresh_time", "sessions", "sticky_sessions", "last_error_code", "usage_stats"}
     result = {key: value for key, value in item.items() if key in fields}
     identity = item.get("account_key") or item.get("id")
     if identity and ("/" in str(identity) or "\\" in str(identity)):
@@ -180,7 +180,21 @@ def install_admin(app, config, gateway):
         if (path, method) in (("/admin/oauth/start", "POST"), ("/admin/oauth/poll", "GET")):
             return await run_in_threadpool(oauth_dispatch, request)
         if path == "/admin/credentials" and method == "GET":
-            return JSONResponse({"credentials": [_public_credential(item) for item in await run_in_threadpool(inventory)]})
+            def list_credentials():
+                items = inventory()
+                stats_map = audit.credential_stats() if hasattr(audit, "credential_stats") else None
+                if not isinstance(stats_map, dict):
+                    stats_map = {}
+                out = []
+                for item in items:
+                    pub = _public_credential(item)
+                    if stats_map and "usage_stats" not in pub:
+                        stats = stats_map.get(pub.get("id")) or stats_map.get(pub.get("name"))
+                        if stats:
+                            pub["usage_stats"] = stats
+                    out.append(pub)
+                return out
+            return JSONResponse({"credentials": await run_in_threadpool(list_credentials)})
         if path.startswith("/admin/credentials/") and method == "DELETE":
             name = path.removeprefix("/admin/credentials/")
             if not _valid_name(name):

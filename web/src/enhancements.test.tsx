@@ -10,7 +10,7 @@ import { api, useResource } from "./api";
 function openRowMenu(credentialName: string) {
   const row = screen
     .getAllByText(credentialName)
-    .map((el) => el.closest("tr"))
+    .map((el) => el.closest<HTMLElement>("tr, article"))
     .find((tr) => tr && within(tr).queryByRole("button", { name: /^更多/ }));
   if (!row) throw new Error(`row for ${credentialName} not found`);
   fireEvent.click(within(row).getByRole("button", { name: /^更多/ }));
@@ -182,7 +182,13 @@ describe("scoped credential buttons", () => {
       ["批量签到", "/checkin"],
       ["同步全部余额", "/sync"],
     ]) {
-      if (label.startsWith("签到 ") || label.startsWith("清除冷却 ")) openRowMenu("one.info");
+      if (
+        label.startsWith("刷新凭证 ") ||
+        label.startsWith("签到 ") ||
+        label.startsWith("清除冷却 ")
+      )
+        openRowMenu("one.info");
+      if (label === "批量签到") fireEvent.click(screen.getByRole("button", { name: "批量操作" }));
       await act(async () => fireEvent.click(screen.getByRole("button", { name: label })));
       expect(post).toHaveBeenLastCalledWith(
         path,

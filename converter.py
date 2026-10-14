@@ -402,6 +402,7 @@ class CredentialManager:
                 "profile": profile, "region": profile_region(profile), "product": profile_product(profile),
                 "nickname": acct.get("nickname"),
                 "enterpriseName": acct.get("enterpriseName"),
+                "enterprise": is_enterprise_account(acct),
                 "token_expires_at": auth.get("expiresAt", 0),
                 "token_expired": self._is_expired(),
                 "last_refresh_time": auth.get("lastRefreshTime") or 0,

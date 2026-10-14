@@ -25,6 +25,9 @@
   --good-bg: #e6f2e5;
   --glow: hsl(var(--hue) 43% 78% / 0.72);
   --glow-alt: hsl(calc(var(--hue) + 38) 35% 79% / 0.65);
+  --series-requests: #3f7fb8;
+  --series-tokens: #4e9e5f;
+  --series-credit: #cf8a2e;
 }
 :root[data-theme="light"][data-palette="blue"] {
   --hue: 213;
@@ -63,6 +66,9 @@
   --good-bg: #263e2f;
   --glow: #35634b55;
   --glow-alt: #284e4955;
+  --series-requests: #7fb2e0;
+  --series-tokens: #8fd0a0;
+  --series-credit: #e3b96f;
 }
 :root[data-theme="dark"] {
   @include dark;

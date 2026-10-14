@@ -555,11 +555,25 @@ class AuditStore:
             for row in series:
                 row["date"] = time.strftime("%Y-%m-%d %H:00" if grain == "hour" else "%Y-%m-%d", time.gmtime(row["bucket"]))
             summary["success_rate"] = summary["success"] / summary["requests"] if summary["requests"] else None
-            return {"summary": summary, "series": series,
+            previous = self._empty_stats()
+            for row in self._db.execute(
+                    "SELECT payload FROM stats_daily WHERE dimension='global' AND bucket>=? AND bucket<?",
+                    (start - days * 86400, start)).fetchall():
+                self._merge(previous, json.loads(row["payload"]))
+            previous["success_rate"] = previous["success"] / previous["requests"] if previous["requests"] else None
+            durations = sorted(r[0] for r in self._db.execute(
+                "SELECT json_extract(payload,'$.duration_ms') FROM requests WHERE started_at>=? AND started_at<=?",
+                (start, now)).fetchall() if r[0] is not None)
+            # Detail rows are pruned by retention; without them the percentile is unknown.
+            summary["p95_duration_ms"] = (durations[max(0, math.ceil(len(durations) * 0.95) - 1)]
+                                          if durations else None)
+            return {"summary": summary, "previous": previous, "series": series,
                     "models": [{"model": key, **value} for key, value in models.items()],
                     "profiles": [{"profile": key, **value} for key, value in profiles.items()],
                     "generated_at": now, "range": {**period, "partial": partial}}
-        return self._run(fetch, {"summary": self._empty_stats(), "series": [], "models": [], "profiles": [], "generated_at": now, "range": period, "degraded": True})
+        return self._run(fetch, {"summary": {**self._empty_stats(), "p95_duration_ms": None},
+                                 "previous": None, "series": [], "models": [], "profiles": [],
+                                 "generated_at": now, "range": period, "degraded": True})
     def storage(self):
         def fetch():
             self._prune()

@@ -13,6 +13,7 @@ import {
 import s from "../ui.module.scss";
 function normalize(value: unknown): RecordValue & {
   summary: RecordValue;
+  previous: RecordValue | null;
   series: RecordValue[];
   models: RecordValue[];
   profiles: RecordValue[];
@@ -28,6 +29,8 @@ function normalize(value: unknown): RecordValue & {
   return {
     ...d,
     summary: object(d.summary, t("dash.summary")),
+    previous:
+      d.previous === null || d.previous === undefined ? null : object(d.previous, "上周期汇总"),
     series: list(d.series, "趋势"),
     models: list(d.models, "模型排行"),
     profiles: list(d.profiles, t("dash.profileUsage")),
@@ -42,7 +45,7 @@ function Health({ data }: { data: RecordValue }) {
   const credentials = list(data.credentials);
   if (!credentials.length) return <Empty title={t("dash.credentialHealthEmpty")} />;
   return (
-    <div className={s.healthList}>
+    <div className={`${s.healthList} ${s.panelScroll}`}>
       {credentials.map((c, i) => (
         <div key={i}>
           <div>
@@ -71,7 +74,7 @@ function OfficialCredits({ value }: { value: unknown }) {
   const rows = Object.entries(object(value));
   if (!rows.length) return <Empty title={t("dash.balanceSnapshotEmpty")} />;
   return (
-    <div className={s.tableWrap}>
+    <div className={`${s.tableWrap} ${s.panelScroll}`}>
       <table>
         <thead>
           <tr>
@@ -118,7 +121,7 @@ function bytes(value: unknown) {
   if (n < 1048576) return `${(n / 1024).toFixed(1)} KiB`;
   return `${(n / 1048576).toFixed(1)} MiB`;
 }
-import { Trend } from "../Trend";
+import { KpiCards, UsageTrend } from "../UsageOverview";
 import { t, useT } from "../i18n";
 export { Trend } from "../Trend";
 export function Dashboard() {
@@ -129,7 +132,6 @@ export function Dashboard() {
   const d = resource.data;
   const period = d?.range ?? {};
   const actualGrain = period.granularity === "hour" ? "hour" : "day";
-  const rate = number(d?.summary.success_rate);
   return (
     <>
       <PageTitle
@@ -171,44 +173,19 @@ export function Dashboard() {
               {t("dash.storageDegraded")}
             </div>
           )}
-          <div className={s.stats}>
-            {[
-              [t("dash.totalRequests"), metric(d.summary.requests), "arrow"],
-              [
-                t("dash.successRate"),
-                rate === null ? t("dash.storage.unknown") : `${(rate * 100).toFixed(1)}%`,
-                "shield",
-              ],
-              [t("dash.totalTokens"), metric(d.summary.total_tokens), "model"],
-              [t("dash.storage.credits"), metric(d.summary.credit), "leaf"],
-            ].map(([label, value, icon]) => (
-              <section className={s.stat} key={label}>
-                <div>
-                  {label}
-                  <span>
-                    <Icon name={icon} />
-                  </span>
-                </div>
-                <strong>{value}</strong>
-              </section>
-            ))}
-          </div>
+          <KpiCards summary={d.summary} previous={d.previous} series={d.series} />
           <div className={s.dashboardGrid}>
-            <Panel
-              title={t("dash.trend")}
-              hint={t("dash.rangeHint", {
-                n: days,
-                grain:
-                  actualGrain === "hour" ? t("dash.granularityHour") : t("dash.granularityDay"),
-              })}
-              className={s.trend}
-            >
+            <Panel title={t("dash.usageTrend")} hint={t("dash.usageTrendHint")} className={s.trend}>
               {period.partial === true && (
                 <p className={s.note} role="status">
                   {t("dash.storagePartial")}
                 </p>
               )}
-              <Trend rows={d.series} granularity={actualGrain} partial={period.partial === true} />
+              <UsageTrend
+                rows={d.series}
+                granularity={actualGrain}
+                partial={period.partial === true}
+              />
             </Panel>
             <Panel title={t("dash.profileUsage")} hint={t("dash.granularityByRequests")}>
               {d.profiles.length ? (
@@ -237,7 +214,7 @@ export function Dashboard() {
             </Panel>
             <Panel title={t("dash.modelRank")}>
               {d.models.length ? (
-                <div className={s.tableWrap}>
+                <div className={`${s.tableWrap} ${s.panelScroll}`}>
                   <table>
                     <thead>
                       <tr>

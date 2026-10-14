@@ -430,6 +430,78 @@ $white: var(--page);
   font-size: 10px;
   color: #96a08e;
 }
+.kpiGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 23px;
+}
+.kpiCard {
+  @include glass(0.48, 18px);
+  border-radius: 20px;
+  padding: 16px 18px 12px;
+  min-width: 0;
+}
+.kpiCard > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #798771;
+  font-size: 12px;
+}
+.kpiCard > div > span:last-child {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  background: #f1f6e9;
+  color: $green;
+  border-radius: 8px;
+}
+.kpiCard strong {
+  display: block;
+  font-size: 26px;
+  letter-spacing: -0.6px;
+  font-weight: 600;
+  margin: 6px 0 2px;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+.kpiCard small {
+  display: block;
+  min-height: 13px;
+  font-size: 10px;
+  color: #96a08e;
+}
+.spark {
+  width: 100%;
+  height: 26px;
+  margin-top: 6px;
+}
+.chartLegend {
+  display: flex;
+  gap: 18px;
+  justify-content: center;
+  padding: 4px 0 8px;
+  font-size: 11px;
+  color: $muted;
+}
+.legendDot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+.panelScroll {
+  max-height: 340px;
+  overflow-y: auto;
+}
+@media (max-width: 1100px) {
+  .kpiGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 .dashboardGrid {
   display: grid;
   grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr);

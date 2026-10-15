@@ -1913,7 +1913,10 @@ $white: var(--page);
   font-size: 12px;
   letter-spacing: 0.3px;
   cursor: pointer;
-  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
 }
 .sidebarBar:hover {
   background: #ffffffa0;
@@ -2766,12 +2769,20 @@ $white: var(--page);
   .workspace {
     transition: none;
   }
-  .collapsed .sidebar nav {
-    justify-content: space-between;
-    margin-top: 12px;
+  /* Mobile collapse stows the whole panel: only the bottom bar remains,
+     so the workspace keeps the full viewport instead of an icon strip. */
+  .collapsed .sidebar {
+    padding: 8px 10px;
   }
-  .collapsed .navItem::after {
-    content: none;
+  .collapsed .sidebarHead,
+  .collapsed .sidebar nav {
+    display: none;
+  }
+  .collapsed .sidebarBar {
+    margin-top: 0;
+  }
+  .collapsed .sidebarBarText {
+    display: inline;
   }
   .sidebar {
     position: relative;

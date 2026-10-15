@@ -289,7 +289,7 @@ const eventActions: Record<string, string> = {
   "session.revoke_failed": "logs.action.session_revoke_failed",
   "credentials.uploaded": "logs.action.credentials_uploaded",
   "credentials.exported": "logs.action.credentials_exported",
-  "storage_archive": "logs.action.storage_archive",
+  storage_archive: "logs.action.storage_archive",
 };
 export function eventActionLabel(action: unknown) {
   return typeof action === "string" ? ownLabel(eventActions, action) : undefined;

@@ -1898,14 +1898,33 @@ $white: var(--page);
 .brandText {
   white-space: nowrap;
 }
-.sidebarToggle {
-  padding: 6px;
-  min-width: 32px;
-  width: 32px;
-  min-height: 32px;
-  border-radius: 11px;
+.sidebarBar {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 14px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  background: #ffffff5c;
+  color: #7c8a72;
+  font-size: 12px;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+.sidebarBar:hover {
+  background: #ffffffa0;
+  border-color: #ffffffd0;
+  color: $ink;
+}
+.sidebarBar svg {
   flex-shrink: 0;
-  background: #ffffff55;
 }
 .brandIcon {
   flex-shrink: 0;
@@ -1926,15 +1945,16 @@ $white: var(--page);
 .collapsed .sidebar {
   padding-inline: 10px;
 }
-.collapsed .sidebarHead {
-  flex-direction: column;
-  gap: 16px;
-}
 .collapsed .brandText,
 .collapsed .navLabel,
 .collapsed .navText,
-.collapsed .navArrow {
+.collapsed .navArrow,
+.collapsed .sidebarBarText {
   display: none;
+}
+.collapsed .sidebarBar {
+  justify-content: center;
+  padding: 11px 8px;
 }
 .collapsed .sidebar nav {
   margin-top: 28px;
@@ -2346,7 +2366,7 @@ $white: var(--page);
   background: var(--soft);
 }
 .header button,
-.sidebarToggle,
+.sidebarBar,
 .drawerHead button {
   background: color-mix(in srgb, var(--surface) 70%, transparent);
 }
@@ -2749,15 +2769,20 @@ $white: var(--page);
   .workspace {
     transition: none;
   }
-  .collapsed .sidebarHead {
-    flex-direction: row;
+  /* Mobile collapse stows the whole panel: only the bottom bar remains,
+     so the workspace keeps the full viewport instead of an icon strip. */
+  .collapsed .sidebar {
+    padding: 8px 10px;
   }
+  .collapsed .sidebarHead,
   .collapsed .sidebar nav {
-    justify-content: space-between;
-    margin-top: 12px;
+    display: none;
   }
-  .collapsed .navItem::after {
-    content: none;
+  .collapsed .sidebarBar {
+    margin-top: 0;
+  }
+  .collapsed .sidebarBarText {
+    display: inline;
   }
   .sidebar {
     position: relative;

@@ -121,6 +121,51 @@ function ImportDrawer({ onClose, onDone }: { onClose: () => void; onDone: () => 
   );
 }
 
+function MaintenanceResults({ results }: { results: Record<string, unknown>[] }) {
+  return (
+    <Panel title="凭证操作结果">
+      <ul className={s.operationResults} aria-live="polite">
+        {results.map((r, i) => {
+          const complete =
+            r.ok === true &&
+            !(r.travel && typeof r.travel === "object" && object(r.travel).ok === false);
+          return (
+            <li key={i}>
+              <strong>{text(r.name)}</strong>
+              <Badge tone={complete ? "good" : "warn"}>
+                {complete
+                  ? "已完成"
+                  : r.checkin_ok === true ||
+                      r.claimed === true ||
+                      r.departed === true ||
+                      r.buddy_claimed === true ||
+                      r.agreement_accepted === true ||
+                      (r.travel &&
+                        typeof r.travel === "object" &&
+                        (object(r.travel).claimed === true || object(r.travel).departed === true))
+                    ? "部分完成"
+                    : r.skipped
+                      ? "已跳过"
+                      : "未完成"}
+              </Badge>
+              <span>{text(r.message)}</span>
+              <TravelSummary
+                trip={
+                  r.travel && typeof r.travel === "object"
+                    ? object(r.travel)
+                    : r.action === "travel" || r.action === "travel-status"
+                      ? r
+                      : null
+                }
+              />
+            </li>
+          );
+        })}
+      </ul>
+    </Panel>
+  );
+}
+
 type ChannelKey = "all" | "cn" | "intl" | "enterprise";
 type ViewMode = "cards" | "list";
 type StatusFilter = "all" | "ready" | "issue" | "disabled";
@@ -720,14 +765,14 @@ export function Credentials() {
           </>
         }
       />
-      {notice && (
+      {!detail && notice && (
         <p className={s.successNotice} role="status">
           {notice}
         </p>
       )}
-      {busy && <p role="status">操作执行中，请勿重复提交…</p>}
+      {!detail && busy && <p role="status">操作执行中，请勿重复提交…</p>}
       <ResourceState {...resource} />
-      <ErrorNotice message={error} />
+      {!detail && <ErrorNotice message={error} />}
       {resource.data && (
         <div className={s.channelGrid} role="group" aria-label="区域与账号类型筛选">
           {channelDefs.map(([key, label, hint]) => {
@@ -783,49 +828,7 @@ export function Credentials() {
           })}
         </div>
       )}
-      {maintenance.length > 0 && (
-        <Panel title="凭证操作结果">
-          <ul className={s.operationResults} aria-live="polite">
-            {maintenance.map((r, i) => {
-              const complete =
-                r.ok === true &&
-                !(r.travel && typeof r.travel === "object" && object(r.travel).ok === false);
-              return (
-                <li key={i}>
-                  <strong>{text(r.name)}</strong>
-                  <Badge tone={complete ? "good" : "warn"}>
-                    {complete
-                      ? "已完成"
-                      : r.checkin_ok === true ||
-                          r.claimed === true ||
-                          r.departed === true ||
-                          r.buddy_claimed === true ||
-                          r.agreement_accepted === true ||
-                          (r.travel &&
-                            typeof r.travel === "object" &&
-                            (object(r.travel).claimed === true ||
-                              object(r.travel).departed === true))
-                        ? "部分完成"
-                        : r.skipped
-                          ? "已跳过"
-                          : "未完成"}
-                  </Badge>
-                  <span>{text(r.message)}</span>
-                  <TravelSummary
-                    trip={
-                      r.travel && typeof r.travel === "object"
-                        ? object(r.travel)
-                        : r.action === "travel" || r.action === "travel-status"
-                          ? r
-                          : null
-                    }
-                  />
-                </li>
-              );
-            })}
-          </ul>
-        </Panel>
-      )}
+      {!detail && maintenance.length > 0 && <MaintenanceResults results={maintenance} />}
       <Panel
         title="账号凭证"
         hint={
@@ -1133,6 +1136,14 @@ export function Credentials() {
             title={`凭证详情 · ${liveDetail.name ?? liveDetail.id}`}
             onClose={() => setDetail(null)}
           >
+            {notice && (
+              <p className={s.successNotice} role="status">
+                {notice}
+              </p>
+            )}
+            {busy && <p role="status">操作执行中，请勿重复提交…</p>}
+            <ErrorNotice message={error} />
+            {maintenance.length > 0 && <MaintenanceResults results={maintenance} />}
             <div className={s.detailBar}>
               <div className={s.credCardBadges}>
                 {renderHealthBadge(liveDetail)}

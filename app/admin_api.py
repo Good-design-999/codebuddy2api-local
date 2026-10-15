@@ -536,16 +536,17 @@ def install_admin(app, config, gateway):
 
     @route("GET", "/admin/storage")
     async def storage_get(request):
+        # A degraded store still reports its own health; a 503 here would hide
+        # the diagnostics this endpoint exists to surface.
         result = await run_in_threadpool(audit.storage)
-        if result.get("degraded"):
-            return error_response(503, "存储状态暂时无法读取，请检查审计存储")
         archives = []
-        try:
-            directory = Path(str(audit.path)).parent / "archives"
-            archives = sorted((entry.name for entry in directory.glob("audit-*.jsonl")), reverse=True)[:20]
-        except OSError as exc:
-            audit._fault(exc)
-            return error_response(503, "存储状态暂时无法读取，请检查审计存储")
+        path = getattr(audit, "path", None)
+        if path:
+            try:
+                directory = Path(str(path)).parent / "archives"
+                archives = sorted((entry.name for entry in directory.glob("audit-*.jsonl")), reverse=True)[:20]
+            except OSError as exc:
+                audit._fault(exc)
         return JSONResponse({**result, "archives": archives})
 
     @route("POST", "/admin/storage/archive")

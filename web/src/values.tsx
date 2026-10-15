@@ -276,6 +276,8 @@ const eventActions: Record<string, string> = {
   "credential.checkin": "logs.action.credential_checkin",
   "credential.daily-chat": "logs.action.credential_daily_chat",
   "credential.auto_daily_chat": "logs.action.credential_auto_daily_chat",
+  "credential.auto_checkin": "logs.action.credential_auto_checkin",
+  "credential.auto_travel": "logs.action.credential_auto_travel",
   "credential.trial": "logs.action.credential_trial",
   "credential.enabled": "logs.action.credential_enabled",
   "credential.reset-cooldown": "logs.action.credential_reset_cooldown",
@@ -284,6 +286,10 @@ const eventActions: Record<string, string> = {
   "model.created": "logs.action.model_created",
   "model.updated": "logs.action.model_updated",
   "model.deleted": "logs.action.model_deleted",
+  "session.revoke_failed": "logs.action.session_revoke_failed",
+  "credentials.uploaded": "logs.action.credentials_uploaded",
+  "credentials.exported": "logs.action.credentials_exported",
+  "storage_archive": "logs.action.storage_archive",
 };
 export function eventActionLabel(action: unknown) {
   return typeof action === "string" ? ownLabel(eventActions, action) : undefined;

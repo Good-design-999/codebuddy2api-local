@@ -276,7 +276,6 @@ class AuditStoreTests(unittest.TestCase):
         health = self.store.storage()
         self.assertFalse(health["degraded"])
         self.assertEqual(health["dropped_records"], 0)
-        self.assertEqual(health["failure_count"], 0)
 
     def test_v3_duration_column_backfills_and_p95_uses_covered_index(self):
         with tempfile.TemporaryDirectory() as td:

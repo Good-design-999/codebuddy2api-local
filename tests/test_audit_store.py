@@ -192,14 +192,19 @@ class AuditStoreTests(unittest.TestCase):
         self.assertEqual(self.store.storage()["ingest_count"], 0)
         self.assertTrue(self.store.storage()["degraded"])
 
-    def test_thread_lock_timeout_is_visible(self):
+    def test_thread_lock_timeout_is_transient_not_degraded(self):
+        # Contention is expected under load; it must never latch the 24h banner.
         record = self.record()
         with self.store._lock:
             start = time.monotonic()
             result = self.store.record_request(record)
         self.assertLess(time.monotonic() - start, 1)
         self.assertFalse(result["ok"])
-        self.assertEqual(self.store.storage()["last_error"], "TimeoutError")
+        health = self.store.storage()
+        self.assertFalse(health["degraded"])
+        self.assertEqual(health["transient_contention"], 1)
+        self.assertEqual(health["dropped_records"], 1)
+        self.assertIsNone(health["last_error"])
 
     def test_transient_fault_degrades_only_within_window(self):
         with patch.object(self.store, "_aggregate", side_effect=sqlite3.OperationalError("boom")):
@@ -218,6 +223,91 @@ class AuditStoreTests(unittest.TestCase):
         self.assertEqual(health["dropped_records"], 1)
         self.assertEqual(health["last_error"], "OperationalError")
 
+    def test_reads_do_not_queue_behind_write_transactions(self):
+        # The WebUI fires parallel dashboard/log/storage reads while inference
+        # writes run; reads take a WAL snapshot, never the write lock.
+        for i in range(3):
+            self.assertTrue(self.store.record_request(
+                self.record(f"r{i}", started_at=time.time() - i, duration_ms=100 + i))["recorded"])
+        with self.store._lock:  # a write transaction in flight
+            self.assertEqual(self.store.ticket()["epoch"], 0)
+            self.assertEqual(self.store.dashboard(30)["summary"]["requests"], 3)
+            self.assertEqual(self.store.get_request("r0")["id"], "r0")
+            self.assertEqual(len(self.store.list_records("request", 10)["items"]), 3)
+            self.assertFalse(self.store.storage()["degraded"])
+        # Writers and readers share no lock; a fresh record commits immediately.
+        self.assertTrue(self.store.record_request(
+            self.record("w0", started_at=time.time()))["recorded"])
+        self.assertFalse(self.store.storage()["degraded"])
+
+    def test_dashboard_view_storm_does_not_drop_traffic_records(self):
+        # Regression: parallel dashboard queries used to steal the 250ms write
+        # lock budget of live traffic and latch a day of false storage alarms.
+        now = time.time()
+        payload = json.dumps({"id": "seed", "duration_ms": 5})
+        with self.store._lock:
+            self.store._db.execute("PRAGMA synchronous=OFF")  # bulk seed only
+            self.store._db.execute("BEGIN IMMEDIATE")
+            self.store._db.executemany(
+                "INSERT INTO requests VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                [(f"s{i}", now - i, "m", "p", "c", "success", 200, payload, 64, None, 5.0)
+                 for i in range(20000)])
+            self.store._db.execute("COMMIT")
+            self.store._db.execute("PRAGMA synchronous=FULL")
+
+        def traffic(tag):
+            dropped = 0
+            for i in range(20):
+                if not self.store.record_request(
+                        self.record(f"{tag}{i}", started_at=time.time()))["ok"]:
+                    dropped += 1
+            return dropped
+
+        with concurrent.futures.ThreadPoolExecutor(5) as pool:
+            futures = [pool.submit(self.store.dashboard, 30),
+                       pool.submit(self.store.dashboard, 1, "hour"),
+                       pool.submit(self.store.storage), pool.submit(traffic, "a"),
+                       pool.submit(traffic, "b")]
+            dashboards = [futures[0].result(), futures[1].result()]
+            dropped = futures[3].result() + futures[4].result()
+        self.assertIsNone(dashboards[0].get("degraded"))
+        self.assertIsNone(dashboards[1].get("degraded"))
+        self.assertEqual(dropped, 0)
+        health = self.store.storage()
+        self.assertFalse(health["degraded"])
+        self.assertEqual(health["dropped_records"], 0)
+        self.assertEqual(health["failure_count"], 0)
+
+    def test_v3_duration_column_backfills_and_p95_uses_covered_index(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "audit.sqlite3"
+            store = AuditStore(path)
+            base = time.time() - 3 * 86400
+            for i in range(5):
+                self.assertTrue(store.record_request(
+                    self.record(f"r{i}", started_at=base + i, duration_ms=100 + i))["recorded"])
+            store.close()
+            with closing(sqlite3.connect(str(path))) as db:
+                db.execute("DROP INDEX requests_duration")
+                db.execute("ALTER TABLE requests DROP COLUMN duration_ms")
+                db.execute("PRAGMA user_version=3")
+                db.commit()
+            migrated = AuditStore(path)
+            try:
+                with closing(sqlite3.connect(str(path))) as db:
+                    self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+                    rows = [r[0] for r in db.execute("SELECT duration_ms FROM requests ORDER BY id").fetchall()]
+                self.assertEqual(rows, [100.0, 101.0, 102.0, 103.0, 104.0])
+                with closing(migrated._open_read()) as plan_conn:
+                    plan = plan_conn.execute(
+                        "EXPLAIN QUERY PLAN SELECT duration_ms FROM requests WHERE started_at>=? AND started_at<=?",
+                        (0, time.time())).fetchall()
+                self.assertIn("COVERING INDEX requests_duration", plan[0][3])
+                summary = migrated.dashboard(30)["summary"]
+                self.assertEqual(summary["requests"], 5)
+                self.assertEqual(summary["p95_duration_ms"], 104)
+            finally:
+                migrated.close()
     def test_v1_ingest_table_migrates_with_backfilled_timestamps(self):
         """Migrate v1 ingest timestamps and indexes while preserving retained deduplication."""
         with tempfile.TemporaryDirectory() as td:

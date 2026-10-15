@@ -14,8 +14,9 @@ import threading
 import time
 import uuid
 from typing import Any
+from urllib.parse import quote
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _CLEANUP_BATCH = 128
 _CLEANUP_SECONDS = 0.05
 METRICS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",
@@ -110,6 +111,7 @@ def _secure_path(path: str | os.PathLike) -> Path:
 class AuditStore:
     # 一次瞬时写失败只让降级标记保持一天；终身计数仍如实上报，不随时间消失。
     DEGRADED_WINDOW_SECONDS = 24 * 3600
+    TRANSIENT_WINDOW_SECONDS = 3600
 
     def __init__(self, path, max_bytes=256 * 1024 * 1024, retention_days=30,
                  preview_limit=8192):
@@ -118,8 +120,9 @@ class AuditStore:
         self._lock = threading.Lock()
         self._archive_lock = threading.Lock()
         self._health_lock = threading.Lock()
-        self.failure_count = self.dropped_records = 0
+        self.failure_count = self.dropped_records = self.transient_count = 0
         self.failure_events: list[float] = []
+        self.transient_events: list[float] = []
         self.last_failure_at: float | None = None
         self.last_error = None
         self._closed = False
@@ -135,7 +138,7 @@ class AuditStore:
             self._db.execute("BEGIN IMMEDIATE")
             version = self._db.execute("PRAGMA user_version").fetchone()[0]
             tables = self._db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-            if version not in (0, 1, 2, SCHEMA_VERSION) or (version == 0 and tables):
+            if version not in (0, 1, 2, 3, SCHEMA_VERSION) or (version == 0 and tables):
                 raise ValueError("unsupported audit schema")
             self._db.execute("CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), epoch INTEGER NOT NULL, detail_generation INTEGER NOT NULL, cleared_at REAL NOT NULL)")
             self._db.execute("INSERT OR IGNORE INTO state VALUES(1,0,0,0)")
@@ -150,6 +153,7 @@ class AuditStore:
                 self._db.execute(f"CREATE TABLE IF NOT EXISTS {table} (bucket INTEGER NOT NULL, dimension TEXT NOT NULL, dimension_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(bucket,dimension,dimension_key))")
             self._migrate_ingest_time()
             self._migrate_client_ip()
+            self._migrate_duration()
             self._db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             self._epoch = self._db.execute("SELECT epoch FROM state").fetchone()[0]
             self._db.execute("COMMIT")
@@ -176,6 +180,26 @@ class AuditStore:
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS requests_client ON requests(client_ip, started_at)")
 
+    def _migrate_duration(self):
+        # Additive v4 migration: a covered (started_at, duration_ms) index keeps
+        # the dashboard P95 scan off per-row json_extract payload parsing.
+        columns = [row[1] for row in self._db.execute("PRAGMA table_info(requests)").fetchall()]
+        if "duration_ms" not in columns:
+            self._db.execute("ALTER TABLE requests ADD COLUMN duration_ms REAL")
+            self._db.execute("UPDATE requests SET duration_ms=json_extract(payload,'$.duration_ms')")
+        self._db.execute("CREATE INDEX IF NOT EXISTS requests_duration ON requests(started_at,duration_ms)")
+
+    def _open_read(self):
+        """Fresh read-only WAL snapshot per call; None falls back to the write path."""
+        try:
+            conn = sqlite3.connect(f"file:{quote(str(self.path))}?mode=ro", uri=True, timeout=5,
+                                   check_same_thread=False, isolation_level=None)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=5000")
+            return conn
+        except sqlite3.Error:
+            return None
+
     def _init_accounting(self):
         # Additive v1 migration: scan legacy details only once, under the same
         # write transaction that installs triggers. Reopening never recounts.
@@ -200,12 +224,18 @@ class AuditStore:
             raise ValueError("invalid preview_limit")
 
     def _fault(self, exc, dropped=False):
+        # Lock contention is expected under load and never latches the degraded
+        # banner; only real storage errors do. Lifetime counters stay honest.
         with self._health_lock:
             self.failure_count += 1
             self.dropped_records += int(dropped)
-            self.failure_events.append(time.monotonic())
             self.last_failure_at = time.time()
+            if isinstance(exc, TimeoutError):
+                self.transient_count += 1
+                self.transient_events.append(time.monotonic())
+                return
             # Exception messages may include SQL or user data; retain only type.
+            self.failure_events.append(time.monotonic())
             self.last_error = type(exc).__name__
 
     def _recent_failures(self):
@@ -215,6 +245,14 @@ class AuditStore:
             while self.failure_events and self.failure_events[0] <= deadline:
                 self.failure_events.pop(0)
             return len(self.failure_events)
+
+    def _recent_transients(self):
+        # Contention is reported for a shorter window; it is visibility, not alarm.
+        with self._health_lock:
+            deadline = time.monotonic() - self.TRANSIENT_WINDOW_SECONDS
+            while self.transient_events and self.transient_events[0] <= deadline:
+                self.transient_events.pop(0)
+            return len(self.transient_events)
 
     def note_failure(self, code="ObservationError"):
         self._fault(RuntimeError(), dropped=True)
@@ -231,7 +269,7 @@ class AuditStore:
             self._db.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
             if write:
                 self._db.execute("BEGIN IMMEDIATE")
-            result = callback()
+            result = callback(self._db)
             if write:
                 self._db.execute("COMMIT")
             if on_commit is not None:
@@ -252,16 +290,37 @@ class AuditStore:
                 self._db.set_progress_handler(None, 0)
             self._lock.release()
 
+    def _read_run(self, callback, fallback=None):
+        """Each read takes a fresh read-only WAL snapshot: dashboards and log
+        listings never queue behind write transactions or each other."""
+        conn = self._open_read()
+        if conn is None:
+            return self._run(callback, fallback)
+        try:
+            if self._closed:
+                raise RuntimeError("closed")
+            deadline = time.monotonic() + 5
+            conn.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+            return callback(conn)
+        except Exception as exc:
+            self._fault(exc)
+            return fallback
+        finally:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
     @property
     def epoch(self):
         return self.ticket()["epoch"]
 
     def ticket(self):
-        def fetch():
-            row = self._db.execute("SELECT epoch,detail_generation FROM state").fetchone()
+        def fetch(db):
+            row = db.execute("SELECT epoch,detail_generation FROM state").fetchone()
             self._epoch = row["epoch"]
             return dict(row)
-        return self._run(fetch, {"epoch": self._epoch, "detail_generation": -1})
+        return self._read_run(fetch, {"epoch": self._epoch, "detail_generation": -1})
 
     @staticmethod
     def _empty_stats():
@@ -278,7 +337,7 @@ class AuditStore:
                 target[key] = (target.get(key) or 0) + value
         return target
 
-    def _aggregate(self, record):
+    def _aggregate(self, db, record):
         increment = self._empty_stats()
         increment["requests"] = 1
         increment[record["outcome"]] = 1
@@ -297,9 +356,9 @@ class AuditStore:
         for table, seconds in (("stats_hourly", 3600), ("stats_daily", 86400), ("stats_totals", 0)):
             bucket = int(record["started_at"] // seconds) * seconds if seconds else 0
             for dimension, key in dimensions:
-                old = self._db.execute(f"SELECT payload FROM {table} WHERE bucket=? AND dimension=? AND dimension_key=?", (bucket, dimension, key)).fetchone()
+                old = db.execute(f"SELECT payload FROM {table} WHERE bucket=? AND dimension=? AND dimension_key=?", (bucket, dimension, key)).fetchone()
                 stats = self._merge(json.loads(old[0]) if old else self._empty_stats(), increment)
-                self._db.execute(f"INSERT OR REPLACE INTO {table} VALUES(?,?,?,?)", (bucket, dimension, key, json.dumps(stats)))
+                db.execute(f"INSERT OR REPLACE INTO {table} VALUES(?,?,?,?)", (bucket, dimension, key, json.dumps(stats)))
 
     def _sanitize_record(self, source):
         result = {key: safe_label(source.get(key)) for key in
@@ -346,29 +405,29 @@ class AuditStore:
         return result
 
     def record_request(self, record):
-        def commit():
+        def commit(db):
             data = self._sanitize_record(record)
-            state = self._db.execute("SELECT * FROM state").fetchone()
+            state = db.execute("SELECT * FROM state").fetchone()
             if data["epoch"] != state["epoch"]:
                 return {"ok": True, "recorded": False, "reason": "stale_epoch"}
-            if not self._db.execute("INSERT OR IGNORE INTO ingest VALUES(?, 'request', ?)", (data["id"], data["started_at"])).rowcount:
+            if not db.execute("INSERT OR IGNORE INTO ingest VALUES(?, 'request', ?)", (data["id"], data["started_at"])).rowcount:
                 return {"ok": True, "recorded": False, "reason": "duplicate"}
-            self._aggregate(data)
+            self._aggregate(db, data)
             generation = record.get("detail_generation")
             keep = (data["started_at"] > state["cleared_at"] and
                     (generation is None or generation == state["detail_generation"]))
             if keep:
                 payload = json.dumps(data, separators=(",", ":"))
-                self._db.execute(
-                    "INSERT INTO requests(id,started_at,model,profile,credential,outcome,status_code,payload,logical_bytes,client_ip) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                db.execute(
+                    "INSERT INTO requests(id,started_at,model,profile,credential,outcome,status_code,payload,logical_bytes,client_ip,duration_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     (data["id"], data["started_at"], data["model"], data["profile"], data["credential"],
                      data["outcome"], data["status_code"], payload,
                      len(payload.encode()) + sum(len(json.dumps(a).encode()) + 32 for a in data["attempts"]) + 256,
-                     data["client_ip"]))
+                     data["client_ip"], data["duration_ms"]))
                 for i, attempt in enumerate(data["attempts"]):
-                    self._db.execute("INSERT INTO attempts VALUES(?,?,?)", (data["id"], i, json.dumps(attempt)))
+                    db.execute("INSERT INTO attempts VALUES(?,?,?)", (data["id"], i, json.dumps(attempt)))
             self._prune()
-            return {"ok": True, "recorded": True, "details": bool(keep and self._db.execute("SELECT 1 FROM requests WHERE id=?", (data["id"],)).fetchone())}
+            return {"ok": True, "recorded": True, "details": bool(keep and db.execute("SELECT 1 FROM requests WHERE id=?", (data["id"],)).fetchone())}
         return self._run(commit, {"ok": False, "recorded": False, "reason": "storage_failure"}, write=True, dropped=True)
 
     def _oldest(self, cutoff=None):
@@ -400,14 +459,15 @@ class AuditStore:
                 break
             self._db.execute("DELETE FROM ingest WHERE id=?", (row[0],))
 
-    def _cleanup_pending(self, budget=None, retention_days=None):
+    def _cleanup_pending(self, budget=None, retention_days=None, db=None):
         budget = self.max_bytes if budget is None else budget
         cutoff = time.time() - (self.retention_days if retention_days is None else retention_days) * 86400
-        accounting = self._db.execute("SELECT logical_bytes,cleanup_target FROM detail_accounting WHERE id=1").fetchone()
-        ingest_expired = self._db.execute(
+        db = self._db if db is None else db
+        accounting = db.execute("SELECT logical_bytes,cleanup_target FROM detail_accounting WHERE id=1").fetchone()
+        ingest_expired = db.execute(
             "SELECT 1 FROM ingest WHERE created_at<? LIMIT 1", (cutoff,)).fetchone()
         return (accounting[0] > budget or accounting[1] is not None or ingest_expired or any(
-            self._db.execute(f"SELECT 1 FROM {table} WHERE started_at<? LIMIT 1", (cutoff,)).fetchone()
+            db.execute(f"SELECT 1 FROM {table} WHERE started_at<? LIMIT 1", (cutoff,)).fetchone()
             for table in ("requests", "events")))
 
     def _prune(self, max_bytes=None, retention_days=None):
@@ -439,13 +499,13 @@ class AuditStore:
         if kind not in ("runtime", "admin"):
             raise ValueError("invalid event kind")
         started_at = time.time()
-        def commit():
+        def commit(db):
             source = details if isinstance(details, dict) else {}
-            state = self._db.execute("SELECT * FROM state").fetchone()
+            state = db.execute("SELECT * FROM state").fetchone()
             if source.get("epoch", state["epoch"]) != state["epoch"]:
                 return {"ok": True, "recorded": False, "reason": "stale_epoch"}
             event_id = safe_label(source.get("event_id", source.get("id"))) or uuid.uuid4().hex
-            if not self._db.execute("INSERT OR IGNORE INTO ingest VALUES(?,?,?)", (event_id, kind, started_at)).rowcount:
+            if not db.execute("INSERT OR IGNORE INTO ingest VALUES(?,?,?)", (event_id, kind, started_at)).rowcount:
                 return {"ok": True, "recorded": False, "reason": "duplicate"}
             if (started_at <= state["cleared_at"] or
                     source.get("detail_generation", state["detail_generation"]) != state["detail_generation"]):
@@ -453,7 +513,7 @@ class AuditStore:
             data = {"id": event_id, "kind": kind, "action": safe_label(action),
                     "started_at": started_at, "details": safe_attempt(source)}
             payload = json.dumps(data)
-            self._db.execute("INSERT INTO events VALUES(?,?,?,?,?,?)", (event_id, data["started_at"], kind, data["action"], payload, len(payload.encode()) + 128))
+            db.execute("INSERT INTO events VALUES(?,?,?,?,?,?)", (event_id, data["started_at"], kind, data["action"], payload, len(payload.encode()) + 128))
             self._prune()
             return {"ok": True, "recorded": True, "id": event_id}
         return self._run(commit, {"ok": False, "recorded": False}, write=True, dropped=True)
@@ -499,23 +559,21 @@ class AuditStore:
             clauses.append("(" + " OR ".join(f"{col} LIKE ? ESCAPE '\\'" for col in columns) + ")")
             params.extend(["%" + term + "%"] * len(columns))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        def fetch():
-            self._prune()
+        def fetch(db):
             params[0] = time.time() - self.retention_days * 86400
-            rows = self._db.execute(f"SELECT payload,started_at,id FROM {table}{where} ORDER BY started_at DESC,id DESC LIMIT ?", (*params, limit + 1)).fetchall()
+            rows = db.execute(f"SELECT payload,started_at,id FROM {table}{where} ORDER BY started_at DESC,id DESC LIMIT ?", (*params, limit + 1)).fetchall()
             more = len(rows) > limit
             rows = rows[:limit]
             return {"items": [json.loads(row["payload"]) for row in rows],
                     "next_cursor": json.dumps([rows[-1]["started_at"], rows[-1]["id"]]) if more else None,
                     "has_more": more}
-        return self._run(fetch, {"items": [], "next_cursor": None, "has_more": False, "degraded": True}, write=True)
+        return self._read_run(fetch, {"items": [], "next_cursor": None, "has_more": False, "degraded": True})
 
     def get_request(self, id):
-        def fetch():
-            self._prune()
-            row = self._db.execute("SELECT payload FROM requests WHERE id=? AND started_at>=?", (id, time.time() - self.retention_days * 86400)).fetchone()
+        def fetch(db):
+            row = db.execute("SELECT payload FROM requests WHERE id=? AND started_at>=?", (id, time.time() - self.retention_days * 86400)).fetchone()
             return json.loads(row[0]) if row else None
-        return self._run(fetch, write=True)
+        return self._read_run(fetch)
 
     def dashboard(self, days=30, granularity="auto"):
         days = int(days)
@@ -527,10 +585,10 @@ class AuditStore:
         now = time.time()
         start = int(now // 86400) * 86400 - (days - 1) * 86400
         period = {"days": days, "start": start, "end": now, "timezone": "UTC", "granularity": grain}
-        def fetch():
+        def fetch(db):
             summary = self._empty_stats()
             series, models, profiles = [], {}, {}
-            rows = self._db.execute("SELECT * FROM stats_daily WHERE bucket>=? AND bucket<=? ORDER BY bucket", (start, now)).fetchall()
+            rows = db.execute("SELECT * FROM stats_daily WHERE bucket>=? AND bucket<=? ORDER BY bucket", (start, now)).fetchall()
             for row in rows:
                 stats = json.loads(row["payload"])
                 if row["dimension"] == "global":
@@ -545,7 +603,7 @@ class AuditStore:
                     target = models if row["dimension"] == "model" else profiles
                     self._merge(target.setdefault(row["dimension_key"], self._empty_stats()), stats)
             if grain == "hour":
-                rows = self._db.execute("SELECT bucket,payload FROM stats_hourly WHERE dimension='global' AND bucket>=? AND bucket<=? ORDER BY bucket", (start, now)).fetchall()
+                rows = db.execute("SELECT bucket,payload FROM stats_hourly WHERE dimension='global' AND bucket>=? AND bucket<=? ORDER BY bucket", (start, now)).fetchall()
                 series = [{"bucket": row["bucket"], **json.loads(row["payload"])} for row in rows]
             partial = grain == "hour" and sum(row["requests"] for row in series) != summary["requests"]
             step = 3600 if grain == "hour" else 86400
@@ -557,32 +615,35 @@ class AuditStore:
                 row["date"] = time.strftime("%Y-%m-%d %H:00" if grain == "hour" else "%Y-%m-%d", time.gmtime(row["bucket"]))
             summary["success_rate"] = summary["success"] / summary["requests"] if summary["requests"] else None
             previous = self._empty_stats()
-            for row in self._db.execute(
+            for row in db.execute(
                     "SELECT payload FROM stats_daily WHERE dimension='global' AND bucket>=? AND bucket<?",
                     (start - days * 86400, start)).fetchall():
                 self._merge(previous, json.loads(row["payload"]))
             previous["success_rate"] = previous["success"] / previous["requests"] if previous["requests"] else None
-            durations = sorted(r[0] for r in self._db.execute(
-                "SELECT json_extract(payload,'$.duration_ms') FROM requests WHERE started_at>=? AND started_at<=?",
-                (start, now)).fetchall() if r[0] is not None)
+            known = db.execute(
+                "SELECT COUNT(*) FROM requests WHERE started_at>=? AND started_at<=? AND duration_ms IS NOT NULL",
+                (start, now)).fetchone()[0]
             # Detail rows can be pruned, archived, or cleared independently of daily
             # aggregates; only report P95 when the detail sample covers the period.
             summary["p95_duration_ms"] = (
-                durations[max(0, math.ceil(len(durations) * 0.95) - 1)]
-                if durations and len(durations) >= summary["duration_ms_known"]
+                db.execute(
+                    "SELECT duration_ms FROM requests WHERE started_at>=? AND started_at<=? AND duration_ms IS NOT NULL"
+                    " ORDER BY duration_ms LIMIT 1 OFFSET ?",
+                    (start, now, max(0, math.ceil(known * 0.95) - 1))).fetchone()[0]
+                if known and known >= summary["duration_ms_known"]
                 else None)
             return {"summary": summary, "previous": previous, "series": series,
                     "models": [{"model": key, **value} for key, value in models.items()],
                     "profiles": [{"profile": key, **value} for key, value in profiles.items()],
                     "generated_at": now, "range": {**period, "partial": partial}}
-        return self._run(fetch, {"summary": {**self._empty_stats(), "p95_duration_ms": None},
+        return self._read_run(fetch, {"summary": {**self._empty_stats(), "p95_duration_ms": None},
                                  "previous": None, "series": [], "models": [], "profiles": [],
                                  "generated_at": now, "range": period, "degraded": True})
 
     def credential_stats(self):
-        def fetch():
+        def fetch(db):
             out = {}
-            for row in self._db.execute(
+            for row in db.execute(
                     "SELECT dimension_key,payload FROM stats_totals WHERE dimension='credential' AND dimension_key!=''").fetchall():
                 stats = json.loads(row["payload"])
                 reqs = stats.get("requests") or 0
@@ -599,7 +660,7 @@ class AuditStore:
                     "credit": stats.get("credit"),
                     "avg_duration_ms": round((stats.get("duration_ms_sum") or 0) / dur_known, 1) if dur_known else None,
                 }
-            for row in self._db.execute(
+            for row in db.execute(
                     "SELECT credential,MAX(started_at) AS last_at,model,outcome,status_code "
                     "FROM requests WHERE credential IS NOT NULL AND credential!='' GROUP BY credential").fetchall():
                 entry = out.setdefault(row["credential"], {
@@ -612,19 +673,23 @@ class AuditStore:
                 entry["last_outcome"] = row["outcome"]
                 entry["last_status_code"] = row["status_code"]
             return out
-        return self._run(fetch, {})
+        return self._read_run(fetch, {})
+
     def storage(self):
-        def fetch():
-            self._prune()
-            self._epoch = self._db.execute("SELECT epoch FROM state").fetchone()[0]
-            page_size = self._db.execute("PRAGMA page_size").fetchone()[0]
-            freelist = self._db.execute("PRAGMA freelist_count").fetchone()[0]
-            return {**dict(self._db.execute("SELECT logical_bytes,request_count,event_count,ingest_count FROM detail_accounting WHERE id=1").fetchone()),
-                    "pending_cleanup": self._cleanup_pending(),
-                    "page_count": self._db.execute("PRAGMA page_count").fetchone()[0],
+        # Opening the storage/dashboard page keeps incremental cleanup moving
+        # with the same bounded write slice; heavy scans stay read-only.
+        self._run(lambda db: self._prune(), write=True)
+
+        def fetch(db):
+            self._epoch = db.execute("SELECT epoch FROM state").fetchone()[0]
+            page_size = db.execute("PRAGMA page_size").fetchone()[0]
+            freelist = db.execute("PRAGMA freelist_count").fetchone()[0]
+            return {**dict(db.execute("SELECT logical_bytes,request_count,event_count,ingest_count FROM detail_accounting WHERE id=1").fetchone()),
+                    "pending_cleanup": self._cleanup_pending(db=db),
+                    "page_count": db.execute("PRAGMA page_count").fetchone()[0],
                     "freelist_pages": freelist, "reclaimable_bytes": freelist * page_size}
-        result = self._run(fetch, {"logical_bytes": None, "pending_cleanup": None,
-                                   "reclaimable_bytes": None}, write=True)
+        result = self._read_run(fetch, {"logical_bytes": None, "pending_cleanup": None,
+                                        "reclaimable_bytes": None})
         sizes = {}
         for key, suffix in (("db_bytes", ""), ("wal_bytes", "-wal"), ("shm_bytes", "-shm")):
             try:
@@ -638,6 +703,7 @@ class AuditStore:
         return {**result, **sizes, "max_bytes": self.max_bytes, "retention_days": self.retention_days,
                 "preview_limit": self.preview_limit, "schema_version": SCHEMA_VERSION, "epoch": self._epoch,
                 "degraded": bool(recent), "recent_failures": recent, "failure_count": self.failure_count,
+                "transient_contention": self._recent_transients(), "transient_count": self.transient_count,
                 "dropped_records": self.dropped_records, "last_error": self.last_error,
                 "last_failure_at": self.last_failure_at,
                 "closed": self._closed, "budget_scope": "details_logical_bytes",
@@ -647,16 +713,16 @@ class AuditStore:
     def clear(self, scope="details"):
         if scope not in ("details", "all"):
             raise ValueError("invalid clear scope")
-        def commit():
+        def commit(db):
             for table in ("requests", "attempts", "events"):
-                self._db.execute(f"DELETE FROM {table}")
-            self._db.execute("UPDATE detail_accounting SET cleanup_target=NULL WHERE id=1")
-            self._db.execute("UPDATE state SET detail_generation=detail_generation+1,cleared_at=? WHERE id=1", (time.time(),))
+                db.execute(f"DELETE FROM {table}")
+            db.execute("UPDATE detail_accounting SET cleanup_target=NULL WHERE id=1")
+            db.execute("UPDATE state SET detail_generation=detail_generation+1,cleared_at=? WHERE id=1", (time.time(),))
             if scope == "all":
                 for table in ("stats_hourly", "stats_daily", "stats_totals", "ingest"):
-                    self._db.execute(f"DELETE FROM {table}")
-                self._db.execute("UPDATE state SET epoch=epoch+1 WHERE id=1")
-            epoch = self._db.execute("SELECT epoch FROM state").fetchone()[0]
+                    db.execute(f"DELETE FROM {table}")
+                db.execute("UPDATE state SET epoch=epoch+1 WHERE id=1")
+            epoch = db.execute("SELECT epoch FROM state").fetchone()[0]
             return {"ok": True, "scope": scope, "epoch": epoch, "aggregates_preserved": scope == "details"}
         return self._run(commit, {"ok": False, "scope": scope}, write=True,
                          on_commit=lambda result: setattr(self, "_epoch", result["epoch"]))
@@ -785,7 +851,7 @@ class AuditStore:
                   self.retention_days if retention_days is None else retention_days,
                   self.preview_limit if preview_limit is None else preview_limit)
         self._validate(*values)
-        def commit():
+        def commit(db):
             # Resolve unspecified settings under the lock, not from a stale
             # snapshot taken before another configure() completed.
             current = (self.max_bytes if max_bytes is None else max_bytes,
@@ -793,7 +859,7 @@ class AuditStore:
                        self.preview_limit if preview_limit is None else preview_limit)
             self._prune(max_bytes=current[0], retention_days=current[1])
             return {"ok": True, "max_bytes": current[0], "retention_days": current[1], "preview_limit": current[2],
-                    "pending_cleanup": self._cleanup_pending(current[0], current[1])}
+                    "pending_cleanup": self._cleanup_pending(current[0], current[1], db=db)}
         def publish(result):
             self.max_bytes, self.retention_days, self.preview_limit = (
                 result["max_bytes"], result["retention_days"], result["preview_limit"])
@@ -802,8 +868,8 @@ class AuditStore:
     def close(self):
         if self._closed:
             return
-        def finish():
-            self._db.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            self._db.close()
+        def finish(db):
+            db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            db.close()
             self._closed = True
         self._run(finish)

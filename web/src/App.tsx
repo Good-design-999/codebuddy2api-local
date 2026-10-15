@@ -79,16 +79,6 @@ function Shell() {
               CodeBuddy<small>{t("app.brandSubtitle")}</small>
             </span>
           </NavLink>
-          <button
-            className={s.sidebarToggle}
-            onClick={toggleSidebar}
-            aria-label={collapsed ? t("app.expandSidebar") : t("app.collapseSidebar")}
-            aria-expanded={!collapsed}
-            aria-controls="workspace-navigation"
-            title={collapsed ? t("app.expandSidebar") : t("app.collapseSidebar")}
-          >
-            <Icon name={collapsed ? "expand" : "collapse"} />
-          </button>
         </div>
         <p className={s.navLabel}>{t("app.workspace")}</p>
         <nav id="workspace-navigation" aria-label={t("app.primaryNav")}>
@@ -113,6 +103,19 @@ function Shell() {
             );
           })}
         </nav>
+        <button
+          className={s.sidebarBar}
+          onClick={toggleSidebar}
+          aria-label={collapsed ? t("app.expandSidebar") : t("app.collapseSidebar")}
+          aria-expanded={!collapsed}
+          aria-controls="workspace-navigation"
+          title={collapsed ? t("app.expandSidebar") : t("app.collapseSidebar")}
+        >
+          <span className={s.sidebarBarText}>
+            {collapsed ? t("app.expandSidebar") : t("app.collapseSidebar")}
+          </span>
+          <Icon name={collapsed ? "expand" : "collapse"} />
+        </button>
       </aside>
       <div className={s.workspace}>
         <header className={s.header}>

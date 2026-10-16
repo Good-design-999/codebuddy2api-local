@@ -22,6 +22,11 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertIs(response.json()[field], enabled)
 
+    def post(self, entry, action):
+        response = self.client.post('/admin/credentials/' + entry['account_key'] + '/' + action)
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()['results'][0]
+
     def periodic(self, entry):
         with patch.object(credits, 'fetch_credits', return_value={'credits': 10, 'intl': entry['profile'].startswith('intl')}):
             return converter._sync_credits(self.pool, self.ledger, entry, checkin=True, failed=set())
@@ -181,6 +186,53 @@ class AutomationTests(unittest.TestCase):
         self.preference(self.entry, 'auto_checkin', False)
 
 
+    def test_enterprise_travel_is_exempt_and_no_longer_reports_an_upstream_403(self):
+        """Replays the reported symptom: an enterprise card stuck on 阶段：状态查询 · HTTP 403.
+
+        The growth center is personal-only, so the account must be recognised as exempt
+        before any request is made, and the stale refusal must be cleared from the ledger
+        so the dashboard stops presenting a permanent bound as the current travel state.
+        """
+        self.add_account('enterprise-tenant', 'cn-cli', enterprise='fylzonuezfnk')
+        # A tenant is a separate identity, so the pool must be rebuilt around both files.
+        self.configure(profiles=('cn-cli', 'enterprise-tenant'))
+        entry = self.entries['enterprise-tenant']
+        # Seed the exact failure the operator saw.
+        self.ledger.update_travel(entry['id'], {'ok': False, 'state': 'unknown', 'phase': 'status',
+                                                'error_kind': 'http', 'http_status': 403, 'code': 403,
+                                                'message': '状态查询失败，未执行写操作'})
+        self.assertTrue(entry['enterprise'])
+        self.assertFalse(model_policy.credential_auto_travel(converter.CONFIG, entry))
+        # The periodic sweep clears the stale refusal instead of replaying it.
+        with patch.object(credits, 'fetch_credits', return_value={'credits': 10, 'intl': False}):
+            converter._sync_credits(self.pool, self.ledger, entry, checkin=True, failed=set())
+        travel_row = self.ledger.entry(entry['id'])['travel']
+        self.assertEqual(travel_row['state'], 'unavailable')
+        self.assertIsNone(travel_row.get('http_status'))
+        self.assertIsNone(travel_row.get('error_kind'))
+        self.assertIn('企业账号', travel_row['message'])
+        # The admin row and the manual action both report the exemption without any request.
+        rows = self.client.get('/admin/credentials').json()['credentials']
+        row = next(r for r in rows if r['name'] == 'enterprise-tenant.info')
+        self.assertIs(row['travel_supported'], False)
+        self.assertIs(row['auto_travel'], False)
+        self.assertEqual(row['travel']['state'], 'unavailable')
+        self.travel_mock.reset_mock()
+        self.requests.clear()
+        result = self.post(entry, 'travel')
+        self.assertTrue(result['skipped'])
+        self.assertIn('企业账号', result['message'])
+        self.travel_mock.assert_not_called()
+        self.assertEqual(self.requests, [])
+
+    def test_a_personal_account_keeps_travelling(self):
+        entry = self.entries['cn-cli']
+        self.assertFalse(entry.get('enterprise') is True)
+        self.assertTrue(model_policy.credential_auto_travel(converter.CONFIG, entry))
+        self.assertTrue(self.post(entry, 'travel')['ok'])
+        self.travel_mock.assert_called_once()
+
+
 class CheckinProtocolTests(unittest.TestCase):
     def test_status_requires_active_and_explicit_today_flag(self):
         cases = [({}, 'unknown'), ({'active': True}, 'unknown'), ({'active': 'true', 'today_checked_in': False}, 'unknown'),
@@ -212,7 +264,6 @@ class CheckinProtocolTests(unittest.TestCase):
             result = checkin.perform('synthetic')
             self.assertFalse(result['ok'])
             claim.assert_not_called()
-
 
 if __name__ == '__main__':
     unittest.main()

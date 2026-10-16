@@ -701,7 +701,9 @@ export function Credentials() {
           <small>
             {c.travel_supported === true
               ? `上次旅行：${trip ? text(trip.message) : "尚未查询"}`
-              : "旅行仅适用于国内账号"}
+              : isEnterprise(c)
+                ? "企业账号不参与成长中心，无法旅行"
+                : "旅行仅适用于国内账号"}
           </small>
         </div>
         <div className={s.credTaskRow}>

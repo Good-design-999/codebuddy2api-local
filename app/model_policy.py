@@ -3,6 +3,7 @@ from contextvars import ContextVar
 
 from fastapi import HTTPException
 
+from app import travel
 from app.model_capabilities import route_metadata
 _request_policy = ContextVar("gateway_model_policy", default=None)
 
@@ -37,7 +38,9 @@ def credential_auto_checkin(config, entry):
 
 
 def credential_auto_travel(config, entry):
-    supported = entry.get("profile") in {"cn-cli", "cn-work"}
+    # The growth center is personal-only, so an enterprise tenant must never be scheduled
+    # for travel even though it shares the domestic product profile.
+    supported = travel.supported(entry.get("profile"), entry.get("enterprise") is True)
     return supported and snapshot(config)["credentials"].get(entry.get("account_key"), {}).get("auto_travel", True)
 
 

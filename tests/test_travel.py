@@ -492,6 +492,61 @@ class TravelTests(unittest.TestCase):
                 self.assertTrue(travel.perform('synthetic-token', profile)['skipped'])
             client.assert_not_called()
 
+    def test_enterprise_never_opens_a_network_client_and_says_why(self):
+        """A tenant is refused by the growth center, so travel must not even try."""
+        with patch('app.travel.httpx.Client') as client:
+            for profile in ('cn-cli', 'cn-work', None):
+                with self.subTest(profile=profile):
+                    result = travel.perform('synthetic-token', profile, enterprise=True)
+                    self.assertTrue(result['skipped'])
+                    self.assertEqual(result['state'], 'unavailable')
+                    self.assertIn('企业账号', result['message'])
+            for profile in ('intl-work', 'intl-cli', 'unknown'):
+                with self.subTest(profile=profile):
+                    # The region bound is the more actionable explanation for these.
+                    result = travel.perform('synthetic-token', profile, enterprise=True)
+                    self.assertTrue(result['skipped'])
+                    self.assertIn('国内账号', result['message'])
+            client.assert_not_called()
+
+    def test_unsupported_gate_matches_the_upstream_personal_only_rule(self):
+        for profile, enterprise, expected in (('cn-cli', False, True), ('cn-work', False, True),
+                                             ('cn-cli', True, False), ('cn-work', True, False),
+                                             ('intl-cli', False, False), ('intl-work', False, False),
+                                             (None, False, False), ('unknown', False, False)):
+            with self.subTest(profile=profile, enterprise=enterprise):
+                self.assertIs(travel.supported(profile, enterprise), expected)
+        # A bare profile keeps the historical call shape working.
+        self.assertTrue(travel.supported('cn-work'))
+        self.assertFalse(travel.supported('intl-work'))
+
+    def test_personal_only_refusal_is_labelled_instead_of_read_as_an_outage(self):
+        """A tenant that slips past the gate must read as a boundary, not a retryable failure."""
+        refusal = httpx.Response(403, json={'code': 403, 'msg': 'growth system is only available for personal users'})
+        # The gate is not told about the tenant here, so the upstream refusal is what
+        # surfaces: it must still be labelled as a capability bound.
+        result, _ = self.run_trip([refusal], profile='cn-work')
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['reason'], 'personal_only')
+        self.assertIn('不参与成长中心', result['message'])
+        self.assertNotIn('失败', result['message'])
+
+    def test_clearing_an_unsupported_account_drops_a_stale_upstream_failure(self):
+        """The stored 403 must not outlive the gate, and repeats must not rewrite the ledger."""
+        with tempfile.TemporaryDirectory() as folder:
+            ledger = CreditLedger(Path(folder)/'ledger.json')
+            ledger.update_travel('one', {'ok': False, 'state': 'unknown', 'phase': 'status',
+                                         'error_kind': 'http', 'http_status': 403, 'code': 403,
+                                         'message': '状态查询失败，未执行写操作'})
+            notice = travel.unavailable('cn-cli', True)
+            self.assertTrue(travel.clear_unsupported(ledger, 'one', notice))
+            stored = ledger.entry('one')['travel']
+            self.assertEqual(stored['state'], 'unavailable')
+            self.assertIsNone(stored.get('http_status'))
+            self.assertIsNone(stored.get('error_kind'))
+            # A second sweep is a no-op, so the housekeeper stays write-free for these accounts.
+            self.assertFalse(travel.clear_unsupported(ledger, 'one', notice))
+
     def test_failure_keeps_last_success_without_recursive_growth(self):
         with tempfile.TemporaryDirectory() as folder:
             ledger = CreditLedger(Path(folder)/'ledger.json')

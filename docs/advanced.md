@@ -135,7 +135,7 @@ Switch back to `legacy` to restore old behavior for new requests; in-flight requ
 
 ## Automation and rewards
 
-Automatic check-in and Buddy travel are per-account switches (WebUI credentials page): on by default domestically, off internationally, applied live without restart.
+Automatic check-in and Buddy travel are per-account switches (WebUI credentials page): on by default for domestic personal accounts, off internationally, applied live without restart. The growth center is personal-only, so enterprise accounts never travel and no longer surface the upstream 403.
 
 `CODEBUDDY2API_AUTO_ACCEPT_BUDDY` is startup-only and defaults to `false`. It preauthorizes enabled domestic accounts for first-Buddy onboarding, agreement and travel; automatic travel still respects its account switch. `first_buddy` needs no acceptance API: pending states, including `not_accepted`, allow one real domestic WorkBuddy conversation on that account. Prefer an eligible zero-rate model, otherwise the lowest known rate; request at most 32 output tokens with possible credit usage. Other reward tasks, paid boxes, pet switching and international trials are excluded.
 

@@ -614,6 +614,7 @@ class CredentialPool:
                         if entry.get("uid"):
                             have_uids.pop(old_identity, None)
                         entry.update(uid=summary.get("uid"), profile=summary["profile"], site=summary["site"],
+                                     enterprise=summary.get("enterprise") is True,
                                      account_key=identity, generation=generation, catalog_dirty=True)
                         self._bind_entry(entry)
                         if reset or replaced:
@@ -655,6 +656,7 @@ class CredentialPool:
                     continue
                 entry = {"id": cid, "cm": manager, "fail_until": 0.0 if summary else time.time() + CRED_COOLDOWN, "uid": uid,
                          "site": summary.get("site"), "profile": profile, "generation": manager._generation,
+                         "enterprise": summary.get("enterprise") is True,
                          "account_key": identity_key, "catalog_dirty": True}
                 self._bind_entry(entry)
                 self._adopt_cooldowns(entry)
@@ -1546,12 +1548,21 @@ def _sync_credits(pool, ledger, entry, *, checkin, failed, expected_identity=Non
                 _sync_error(pool, ledger, entry, generation, "checkin", error)
         if not model_policy.credential_enabled(CONFIG, entry):
             return None
+        if checkin and not travel.supported(entry.get("profile"), entry.get("enterprise") is True):
+            # The exemption is terminal, so keep the ledger honest instead of leaving the
+            # previous upstream refusal as this account's current travel state. A stored
+            # notice is only rewritten when it differs, so the sweep stays a no-op after.
+            notice = travel.unavailable(entry.get("profile"), entry.get("enterprise") is True)
+            if not pool.apply_if_current(cm, generation, lambda: travel.clear_unsupported(ledger, cid, notice)):
+                failed.add(cid)
+                return None
         if checkin and model_policy.credential_auto_travel(CONFIG, entry):
             try:
                 def can_travel():
                     return (model_policy.credential_auto_travel(CONFIG, entry)
                             and pool.apply_if_current(cm, generation, lambda: None))
                 trip = travel.perform(token, profile_for_headers(headers), can_write=can_travel,
+                                      enterprise=entry.get("enterprise") is True,
                                       buddy_context=_buddy_context(entry, headers))
                 if not pool.apply_if_current(cm, generation, lambda: travel.remember(ledger, cid, trip)):
                     failed.add(cid)

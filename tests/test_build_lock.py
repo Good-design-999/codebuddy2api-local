@@ -103,6 +103,8 @@ class BuildLockTests(unittest.TestCase):
                     if str(step.get("uses", "")).startswith("docker/metadata-action"))
         tags = [line.strip() for line in step["with"]["tags"].splitlines() if line.strip()]
         self.assertEqual(tags, [
+            # Pull-request builds carry an identity but are never pushed.
+            "type=ref,event=pr",
             "type=semver,pattern={{version}}",
             "type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}",
             "type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}",

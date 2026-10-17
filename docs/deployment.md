@@ -10,15 +10,18 @@ On first setup, run `cp .env.example .env` and set `CODEBUDDY2API_KEY` to your o
 
 | Setting | Purpose |
 |---------|---------|
-| `CODEBUDDY2API_IMAGE` | Compose image; the template uses `codebuddy2api:local` |
+| `CODEBUDDY2API_IMAGE` | Compose image; defaults to the published `latest` tag |
 | `CODEBUDDY2API_BIND` / `CODEBUDDY2API_PORT` | Native listener and Compose host mapping; default `127.0.0.1:8787` |
 | `CODEBUDDY2API_AUTH_PATH` | Compose host data directory; defaults to `./auth`, mounted at `/data/auth` |
+| `TZ` | Container time zone; daily guards follow it, and an unset value keeps UTC |
+| `CODEBUDDY2API_ENV_FILE` | Optional Compose override for the env file path; defaults to `.env` |
+| `CODEBUDDY2API_ALLOW_OPEN_NOAUTH` | Headless no-auth opt-in for the image and Compose, where it stays `true`; configure `CODEBUDDY2API_KEY` before exposing the port |
 | `CODEBUDDY2API_TRUSTED_PROXIES` | Trusted proxy IPs/CIDRs (comma separated); when the direct peer matches, the audit log records the client from `X-Forwarded-For`/`X-Real-IP` instead of the proxy address |
 | `CODEBUDDY_AUTH_DIR` | Local Python data directory; defaults to the repository's `auth/`. Compose sets it to `/data/auth` inside the container |
 | `CODEBUDDY_IMPORT_DIR` | Optional import directory; defaults to `imports/` under the data directory. Use container paths with Compose |
-The example lists all active runtime variables, including inbound/aggregate byte limits, concurrency, tool retries and failover. Compose forwards these limits; unset optional settings (tool metadata, Responses projection, origin allowlist, failover and similar) remain configurable in the WebUI. Zero disables aggregate/concurrency limits, per-item Responses trimming or extra retries, not the required positive inbound limit.
+`.env.example` lists every active runtime variable with its default. Compose loads the whole file, so a key you comment out stays editable in the WebUI (tool metadata, Responses projection, origin allowlist, failover and similar). Zero disables aggregate/concurrency limits, per-item Responses trimming or extra retries, not the required positive inbound limit.
 
-Compose reads declared variables from `.env`; shell variables take precedence. The default host mapping is loopback. Set a random key, HTTPS and access restrictions before allowing remote connections. Container binding remains `0.0.0.0:8787`; change host exposure using `BIND/PORT`, not container listener arguments.
+Compose loads `.env` into the container; shell variables still win for the image, host mapping and data path. The default host mapping is loopback. Set a random key, HTTPS and access restrictions before allowing remote connections. Container binding remains `0.0.0.0:8787`; change host exposure using `BIND/PORT`, not container listener arguments.
 
 Mount the entire data directory on writable local storage, not just one SQLite file, and do not share it between instances. Stop the gateway and back up the whole directory before upgrading; see [data and backups](webui.md#data-and-backups).
 
@@ -26,7 +29,7 @@ Mount the entire data directory on writable local storage, not just one SQLite f
 
 ### Use published images
 
-Set `CODEBUDDY2API_IMAGE` in `.env` to `ghcr.io/maiphucgiang/codebuddy2api:<version>`, choosing an existing release, then run:
+Compose loads every key in `.env` into the container, so optional settings reach the gateway without repeating variable names; a missing `.env` still starts with the gateway defaults and the settings saved in SQLite. Set `CODEBUDDY2API_IMAGE` in `.env` to `ghcr.io/maiphucgiang/codebuddy2api:<version>` to pin an existing release, then run:
 
 ```bash
 docker compose pull
@@ -58,13 +61,15 @@ The default loopback mapping is the only safe exposure without extra work. When 
 
 ## Local Python setup
 
-Requires Python 3.12+, uv, and Node.js with the vp CLI to build the interface:
+Requires Python 3.12+ and uv. Build the interface only when the distribution does not include it, using Node.js 24 and the vp CLI pinned by `vite-plus` in `web/package.json`.
 
 ```bash
 uv sync --locked --no-build --python 3.12
 (cd web && vp install --frozen-lockfile && vp build)
-uv run converter.py
+uv run --locked --no-build converter.py --host 127.0.0.1 --port 8787
 ```
+
+`--locked` stops instead of re-resolving when `uv.lock` is stale, so a source launch never upgrades packages. `.env` in the working directory is read automatically, so `uv run` needs no `--env-file`. Distribution archives already contain the WebUI; skip the frontend build there.
 
 Local startup does not require `.env`. Without an explicit key, the first loopback startup generates a `cb-…` default key in `auth/control.sqlite3` and displays it once in the interactive terminal after listening succeeds. Restarts reuse it without printing it again. Keep it safe: management and API requests share this key. Configure a key explicitly for first-time headless or non-loopback deployment.
 
@@ -72,9 +77,36 @@ One-time disclosure goes directly to the controlling terminal (`/dev/tty` or Win
 
 A failed terminal write or database commit leaves the same key pending for the next interactive start. A crash between display and commit can therefore repeat the notice; a successfully committed display is not repeated.
 
-Without uv, run `python3 -m venv .venv`, activate it, install dependencies with `pip install --require-hashes --only-binary=:all: -r requirements.txt`, then run `python3 converter.py`. Distribution archives include the WebUI; source installs still need the frontend build.
+Without uv, keep the same hash-locked set in a virtual environment:
 
-Both commands optionally read `.env` in the current working directory, never parent directories. Precedence: explicit CLI > process environment > `.env` > saved SQLite values > defaults. Overrides do not replace the saved default key; an explicitly empty key still locks management. Listener changes require restart; `CODEBUDDY2API_IMAGE/AUTH_PATH` are Compose-only.
+```bash
+python3 -m venv .venv
+. .venv/bin/activate          # Windows: .venv\Scripts\activate
+python3 -m pip install --require-hashes --only-binary=:all: -r requirements.txt
+python3 converter.py --host 127.0.0.1 --port 8787
+```
+
+Both startup paths read `.env` in the current working directory when present, never parent directories. Precedence: explicit CLI > process environment > `.env` > saved SQLite values > defaults. Overrides do not replace the saved default key; an explicitly empty key still locks management. Listener changes require restart; `CODEBUDDY2API_IMAGE/AUTH_PATH` only affect Compose.
+
+### Configuration migration
+
+`.env` values stay authoritative, so any runtime key listed there occupies its WebUI field. To move them into the configuration store, stop the service and run the offline command; it never edits `.env` itself:
+
+```bash
+python3 converter.py config migrate            # cwd/.env -> ./auth/control.sqlite3
+python3 converter.py config migrate --env-file /srv/app/.env --data-dir /srv/app/auth
+python3 converter.py config status --db /srv/app/auth/control.sqlite3   # read-only
+```
+
+Both commands resolve the env file first, then the data directory it declares (`CODEBUDDY_AUTH_DIR`), so `--data-dir`/`--db` only override the resolved target. Before writing, `migrate` verifies the target really is this project's control store (SQLite header, `user_version=2`, `control`/`runtime_state`/`gateway_secrets`, readable payload, `quick_check`) and refuses while a running instance holds the lease or the write lock; `--force` bypasses the lease warning only. Deployment keys (key, listener, data paths) are never migrated. Inside a container there is no `.env` file, so use the process environment:
+
+```bash
+docker compose stop
+docker compose run --rm --no-deps -e CODEBUDDY_AUTH_DIR=/data/auth \
+  codebuddy2api python3 converter.py config migrate --no-env --data-dir /data/auth
+```
+
+A successful run writes the values and disables the Dashboard notice in one revision; delete the printed `.env` lines when you want the WebUI to supply them. Instances started before this release write no lease, so confirm the service is stopped once after upgrading. `config status` never writes. `--lang zh|en|auto` selects the CLI output language and, for `serve`, `login` and `config migrate`, also saves the interface language; see [configuration and CLI](advanced.md#configuration-and-cli).
 
 > The audit schema is single-writer: stop the old instance before starting a new version, and never run two gateway versions against one auth directory.
 
@@ -90,14 +122,14 @@ Older versions cannot read the upgraded control database. Downgrades require a s
 
 ## Dependency locks
 
-`pyproject.toml` owns direct dependencies; `uv.lock` pins all resolved versions. `requirements.in` and the hash-locked `requirements.txt` are generated compatibility files for pip, Docker and CI:
+`pyproject.toml` owns direct dependencies; `uv.lock` pins all resolved versions. The hash-locked `requirements.txt` is the generated pip input for Docker and CI:
 
 ```bash
 uv lock
 python3 scripts/export_requirements.py
 ```
 
-Use `uv add`/`uv remove` for intentional dependency changes, then export and review both locks. Normal startup uses `--locked` and never upgrades packages. Metadata stays at the current `VERSION`; releases must update both version fields. Pip/Docker still require matching hashes and binary wheels; do not disable these checks.
+Use `uv add`/`uv remove` for intentional dependency changes, then export and review the lock. Normal startup uses `--locked` and never upgrades packages. Metadata stays at the current `VERSION`; releases must update both version fields. Pip/Docker still require matching hashes and binary wheels; do not disable these checks.
 
 Docker's build frontend, Node and Python images are pinned by multi-platform digest. When refreshing them, retain `linux/amd64` and `linux/arm64` support and verify the build. Locks prevent drift, not future vulnerabilities; security updates still require reviewed refreshes.
 
@@ -106,9 +138,9 @@ Docker's build frontend, Node and Python images are pinned by multi-platform dig
 When the WebUI is unavailable, browser login also works without starting the server:
 
 ```bash
-uv run --locked --no-build --env-file .env converter.py login
-uv run --locked --no-build --env-file .env converter.py login --site intl --no-browser
-uv run --locked --no-build --env-file .env converter.py login --site intl-codebuddy --no-browser
+uv run --locked --no-build converter.py login
+uv run --locked --no-build converter.py login --site intl --no-browser
+uv run --locked --no-build converter.py login --site intl-codebuddy --no-browser
 ```
 
 The first command uses the domestic site. `--site intl` selects international WorkBuddy (`www.workbuddy.ai`); `--site intl-codebuddy` selects international CodeBuddy (`www.codebuddy.ai`). `--no-browser` prints a link you can open on another device. Even after the browser reports success, wait for the terminal to confirm that credentials were saved. Links expire after 10 minutes; press `Ctrl+C` to cancel.

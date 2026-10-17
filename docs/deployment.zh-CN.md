@@ -10,16 +10,19 @@
 
 | 配置 | 作用 |
 |------|------|
-| `CODEBUDDY2API_IMAGE` | Compose 镜像；模板默认 `codebuddy2api:local` |
+| `CODEBUDDY2API_IMAGE` | Compose 镜像；默认使用已发布的 `latest` 标签 |
 | `CODEBUDDY2API_BIND` / `CODEBUDDY2API_PORT` | 本地监听与 Compose 宿主机映射；默认 `127.0.0.1:8787` |
 | `CODEBUDDY2API_AUTH_PATH` | Compose 宿主机数据目录；默认 `./auth`，挂载到容器 `/data/auth` |
+| `TZ` | 容器时区；每日任务按它跨天，未设置时保持 UTC |
+| `CODEBUDDY2API_ENV_FILE` | 可选的 Compose 覆盖项，指定 env 文件路径；默认 `.env` |
+| `CODEBUDDY2API_ALLOW_OPEN_NOAUTH` | 镜像与 Compose 的后台免鉴权选项，在两者中都固定为 `true`；对外暴露端口前请配置 `CODEBUDDY2API_KEY` |
 | `CODEBUDDY2API_TRUSTED_PROXIES` | 可信代理 IP/CIDR（逗号分隔）；直连地址命中时审计改记 `X-Forwarded-For`/`X-Real-IP` 里的真实客户端地址，而不是代理地址 |
 | `CODEBUDDY_AUTH_DIR` | 本地 Python 数据目录；默认仓库内 `auth/`。Compose 在容器内固定为 `/data/auth` |
 | `CODEBUDDY_IMPORT_DIR` | 可选导入目录；默认数据目录下的 `imports/`。Compose 中请使用容器路径 |
 
-示例文件列出了全部生效的运行时变量，包括入站/聚合字节上限、并发、工具重试与故障转移。Compose 会转发这些限制；未设置的可选项（工具元数据、Responses 投影、来源白名单、故障转移等）仍可在 WebUI 配置。取零表示关闭聚合/并发限制、Responses 单项裁剪或额外重试，而入站上限必须为正值。
+`.env.example` 列出了全部生效的运行时变量及其默认值。Compose 会整体加载该文件，注释掉的键仍可在 WebUI 配置（工具元数据、Responses 投影、来源白名单、故障转移等）。取零表示关闭聚合/并发限制、Responses 单项裁剪或额外重试，而入站上限必须为正值。
 
-Compose 从 `.env` 读取已声明变量，shell 变量优先。默认宿主机映射仅回环。开放远程访问前请设置随机密钥、HTTPS 与访问限制。容器内监听保持 `0.0.0.0:8787`；调整对外暴露用 `BIND/PORT`，不要改容器监听参数。
+Compose 会把 `.env` 加载进容器；镜像、宿主机映射与数据路径仍以 shell 变量优先。默认宿主机映射仅回环。开放远程访问前请设置随机密钥、HTTPS 与访问限制。容器内监听保持 `0.0.0.0:8787`；调整对外暴露用 `BIND/PORT`，不要改容器监听参数。
 
 数据目录需整体挂载在可写本地存储，不要只挂载单个 SQLite 文件，也不要在多个实例间共享。升级前停止网关并备份整个目录，见[数据与备份](webui.zh-CN.md#数据与备份)。
 
@@ -27,7 +30,7 @@ Compose 从 `.env` 读取已声明变量，shell 变量优先。默认宿主机�
 
 ### 使用已发布镜像
 
-在 `.env` 中将 `CODEBUDDY2API_IMAGE` 设为 `ghcr.io/maiphucgiang/codebuddy2api:<版本>`（选择已发布的版本），然后运行：
+Compose 会把 `.env` 中的每个键加载进容器，可选配置无需在 Compose 里重复变量名；缺少 `.env` 时仍以网关默认值和 SQLite 中保存的设置为准。将 `CODEBUDDY2API_IMAGE` 设为 `ghcr.io/maiphucgiang/codebuddy2api:<版本>` 可固定使用已发布版本，然后运行：
 
 ```bash
 docker compose pull
@@ -59,13 +62,15 @@ docker compose up -d
 
 ## 本地 Python 运行
 
-需要 Python 3.12+、uv，以及 Node.js 与 vp CLI 来构建界面：
+需要 Python 3.12+ 与 uv。仅在发行包未自带界面时才需构建：Node.js 24 与 `web/package.json` 中 `vite-plus` 锁定的 vp CLI。
 
 ```bash
 uv sync --locked --no-build --python 3.12
 (cd web && vp install --frozen-lockfile && vp build)
-uv run converter.py
+uv run --locked --no-build converter.py --host 127.0.0.1 --port 8787
 ```
+
+`uv.lock` 过期时 `--locked` 会直接失败而不是重新解析，因此源码启动不会升级依赖。当前工作目录的 `.env` 会被自动读取，`uv run` 无需 `--env-file`。发行包已包含 WebUI，可跳过界面构建。
 
 本地启动无需 `.env`。没有显式 key 时，首次回环启动会生成 `cb-…` 默认密钥，保存到 `auth/control.sqlite3`，监听成功后仅在交互终端显示一次；以后重启复用且不再打印。请妥善保存，管理登录与 API 请求共用。首次后台或非回环部署请显式配置 key。
 
@@ -73,9 +78,36 @@ uv run converter.py
 
 终端写入或数据库提交失败时，同一密钥保留为待显示，下次交互启动可重试。显示后、提交前崩溃可能再次提示；成功提交后不重复显示。
 
-没有 uv 时：运行 `python3 -m venv .venv` 并激活，用 `pip install --require-hashes --only-binary=:all: -r requirements.txt` 安装依赖，再执行 `python3 converter.py`。发行包已包含 WebUI；源码安装仍需构建界面。
+没有 uv 时，用虚拟环境安装同一份带哈希的依赖：
 
-两种启动方式均可选读取当前工作目录的 `.env`，不搜索父目录。优先级：显式 CLI > 进程环境变量 > `.env` > SQLite 保存值 > 默认值。覆盖不改写已保存的默认 key；显式空 key 仍锁定管理。修改监听需重启，`CODEBUDDY2API_IMAGE/AUTH_PATH` 仅用于 Compose。
+```bash
+python3 -m venv .venv
+. .venv/bin/activate          # Windows：.venv\Scripts\activate
+python3 -m pip install --require-hashes --only-binary=:all: -r requirements.txt
+python3 converter.py --host 127.0.0.1 --port 8787
+```
+
+两种启动方式都会读取当前工作目录的 `.env`（若存在），不搜索父目录。优先级：显式 CLI > 进程环境变量 > `.env` > SQLite 保存值 > 默认值。覆盖不改写已保存的默认 key；显式空 key 仍锁定管理。修改监听需重启，`CODEBUDDY2API_IMAGE/AUTH_PATH` 只作用于 Compose。
+
+### 配置迁移
+
+`.env` 中的值仍然优先，因此任何写在里面的运行参数都会占住 WebUI 的对应项。要统一到配置库，先停止服务，再执行离线命令；命令不会改动 `.env` 本身：
+
+```bash
+python3 converter.py config migrate            # 当前目录 .env -> ./auth/control.sqlite3
+python3 converter.py config migrate --env-file /srv/app/.env --data-dir /srv/app/auth
+python3 converter.py config status --db /srv/app/auth/control.sqlite3   # 只读
+```
+
+两条命令都先解析 env 文件，再采用其中声明的数据目录（`CODEBUDDY_AUTH_DIR`），`--data-dir`/`--db` 只覆盖解析结果。写入前 `migrate` 会验证目标确实是本项目的控制库（SQLite 魔数、`user_version=2`、`control`/`runtime_state`/`gateway_secrets`、可解析的 payload、`quick_check`），并在检测到运行中实例的租约或写锁时拒绝；`--force` 只跳过租约提示。部署类键（密钥、监听地址、数据路径）不会迁移。容器内没有 `.env` 文件，改用进程环境变量：
+
+```bash
+docker compose stop
+docker compose run --rm --no-deps -e CODEBUDDY_AUTH_DIR=/data/auth \
+  codebuddy2api python3 converter.py config migrate --no-env --data-dir /data/auth
+```
+
+成功时值写入与“关闭 Dashboard 提醒”在同一次 revision 内提交；按提示删除 `.env` 中对应行后，这些项改由配置库提供、可在 WebUI 修改。旧版本启动的实例不写租约，升级后首次迁移前请自行确认服务已停止。`config status` 不写库。`--lang zh|en|auto` 决定 CLI 输出语言，并在 `serve`、`login`、`config migrate` 时把界面语言一并保存；见[配置与 CLI](advanced.zh-CN.md#配置与-cli)。
 
 > 审计库为单写者设计：升级新版本前先停止旧实例，不要让两个版本的网关共用同一 auth 目录。
 
@@ -91,14 +123,14 @@ SQLite 状态读取或校验失败会阻止启动，不删除会话、不回退�
 
 ## 依赖锁定
 
-`pyproject.toml` 声明直接依赖；`uv.lock` 锁定全部解析版本。`requirements.in` 与带哈希的 `requirements.txt` 是供 pip、Docker 与 CI 使用的生成文件：
+`pyproject.toml` 声明直接依赖；`uv.lock` 锁定全部解析版本。带哈希的 `requirements.txt` 是供 pip、Docker 与 CI 使用的生成文件：
 
 ```bash
 uv lock
 python3 scripts/export_requirements.py
 ```
 
-有意调整依赖时使用 `uv add`/`uv remove`，然后导出并核对两份锁定。日常启动使用 `--locked`，不会升级任何包。元数据与当前 `VERSION` 保持一致；发版必须同时更新两处版本字段。pip/Docker 仍要求哈希匹配与二进制 wheel，不要关闭这些校验。
+有意调整依赖时使用 `uv add`/`uv remove`，然后导出并核对锁定文件。日常启动使用 `--locked`，不会升级任何包。元数据与当前 `VERSION` 保持一致；发版必须同时更新两处版本字段。pip/Docker 仍要求哈希匹配与二进制 wheel，不要关闭这些校验。
 
 Docker 构建所用的前端、Node 与 Python 镜像均按多平台摘要锁定。刷新它们时保留 `linux/amd64` 与 `linux/arm64` 支持并验证构建。锁定只能防止漂移，不能免疫未来漏洞；安全更新仍需评审后刷新。
 
@@ -107,9 +139,9 @@ Docker 构建所用的前端、Node 与 Python 镜像均按多平台摘要锁定
 WebUI 不可用时不启动服务也能完成浏览器登录：
 
 ```bash
-uv run --locked --no-build --env-file .env converter.py login
-uv run --locked --no-build --env-file .env converter.py login --site intl --no-browser
-uv run --locked --no-build --env-file .env converter.py login --site intl-codebuddy --no-browser
+uv run --locked --no-build converter.py login
+uv run --locked --no-build converter.py login --site intl --no-browser
+uv run --locked --no-build converter.py login --site intl-codebuddy --no-browser
 ```
 
 第一条使用国内站。`--site intl` 选择国际 WorkBuddy（`www.workbuddy.ai`）；`--site intl-codebuddy` 选择国际 CodeBuddy（`www.codebuddy.ai`）。`--no-browser` 打印授权链接，可在其他设备打开。即使浏览器显示成功，也要等终端确认凭证已保存。链接 10 分钟过期；按 `Ctrl+C` 取消。

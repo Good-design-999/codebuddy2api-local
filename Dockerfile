@@ -30,4 +30,4 @@ COPY --from=frontend /web/dist/ ./web/dist/
 EXPOSE 8787
 # Listen on container interfaces; host port mapping controls external access.
 ENV CODEBUDDY2API_ALLOW_OPEN_NOAUTH=true
-CMD ["python3", "converter.py", "--host", "0.0.0.0", "--port", "8787", "--skip-check"]
+CMD ["python3", "converter.py", "--host", "0.0.0.0", "--port", "8787", "--skip-check", "--desensitize"]

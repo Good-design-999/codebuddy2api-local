@@ -60,7 +60,7 @@ claude
 
 - Claude Code、Anthropic SDK 与 CC Switch 的 Anthropic 提供方使用不含 `/v1/messages` 的 Base URL；SDK 会自行追加路径。只有明确要求完整端点的客户端才应包含 `/v1/messages`。
 - `POST /v1/messages` 会转换为上游 Chat Completions，保留原生工具调用与推理内容。
-- `--desensitize` 控制 WorkBuddy 固定 CLI 模板的适配，默认关闭，项目的 Compose 配置已启用。保留更完整指令等选项见[进阶参考](advanced.zh-CN.md)。
+- `--desensitize` 控制 WorkBuddy 固定 CLI 模板的适配，默认关闭，已发布镜像中启用。保留更完整指令等选项见[进阶参考](advanced.zh-CN.md)。
 
 ## 其他 OpenAI 兼容客户端
 

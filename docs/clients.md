@@ -60,7 +60,7 @@ claude
 
 - Claude Code, Anthropic SDKs and CC Switch's Anthropic provider use a Base URL without `/v1/messages`; SDKs append the path themselves. Only clients explicitly asking for a complete endpoint should include `/v1/messages`.
 - `POST /v1/messages` is converted to upstream Chat Completions, retaining native tool calls and reasoning content.
-- `--desensitize` controls WorkBuddy's fixed CLI-template adaptation. It is off by default and enabled in the project's Compose configuration. See the [advanced reference](advanced.md) for options such as retaining fuller instructions.
+- `--desensitize` controls WorkBuddy's fixed CLI-template adaptation. It is off by default and enabled in the published image. See the [advanced reference](advanced.md) for options such as retaining fuller instructions.
 
 ## Other OpenAI-compatible clients
 

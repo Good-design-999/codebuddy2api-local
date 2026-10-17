@@ -1,6 +1,0 @@
-# Generated from pyproject.toml by scripts/export_requirements.py; do not edit.
-fastapi>=0.141.1
-httpx>=0.28.1
-pytest>=9.1.1
-python-dotenv>=1.2.3
-uvicorn[standard]>=0.52.4

@@ -20,6 +20,12 @@ def requirement_lines(path):
             yield line.strip()
 
 
+def direct_requirements():
+    """Canonical names of the project's direct dependencies, read from pyproject."""
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    return {canonicalize_name(Requirement(dep).name) for dep in project["dependencies"]}
+
+
 class BuildLockTests(unittest.TestCase):
     def test_every_resolved_dependency_has_an_exact_version_and_sha256(self):
         locked = set()
@@ -36,15 +42,15 @@ class BuildLockTests(unittest.TestCase):
                 for digest in hashes:
                     self.assertRegex(digest.strip(), r"^sha256:[0-9a-f]{64}$")
                 locked.add(canonicalize_name(parsed.name))
-        direct = {canonicalize_name(Requirement(line).name)
-                  for line in requirement_lines(ROOT / "requirements.in")}
+        direct = direct_requirements()
         self.assertTrue(direct)
         self.assertTrue(direct <= locked)
 
     def test_uv_metadata_and_exported_locks_stay_consistent(self):
         project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
         self.assertEqual(project["version"], (ROOT / "VERSION").read_text().strip())
-        self.assertEqual(set(project["dependencies"]), set(requirement_lines(ROOT / "requirements.in")))
+        self.assertEqual(direct_requirements(), {canonicalize_name(Requirement(dep).name)
+                                                 for dep in project["dependencies"]})
         lock = tomllib.loads((ROOT / "uv.lock").read_text())
         packages = {p["name"]: p for p in lock["package"] if p["name"] != project["name"]}
         exported = set()
@@ -89,6 +95,19 @@ class BuildLockTests(unittest.TestCase):
             self.assertEqual(shlex.split(install), ["python", "-m", "pip", "install",
                              "--require-hashes", "--only-binary=:all:", "-r", "requirements.txt"])
 
+
+    def test_published_image_tags_are_version_edge_and_latest(self):
+        """Only the release version, edge for main and latest for releases are published."""
+        workflow = yaml.safe_load((ROOT / ".github/workflows/docker.yml").read_text())
+        step = next(step for step in workflow["jobs"]["image"]["steps"]
+                    if str(step.get("uses", "")).startswith("docker/metadata-action"))
+        tags = [line.strip() for line in step["with"]["tags"].splitlines() if line.strip()]
+        self.assertEqual(tags, [
+            "type=semver,pattern={{version}}",
+            "type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}",
+            "type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}",
+        ])
+        self.assertNotIn("flavor", step["with"])
 
     def test_ci_and_container_installs_require_verified_wheels(self):
         installs = []

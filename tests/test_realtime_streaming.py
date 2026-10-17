@@ -644,7 +644,7 @@ class RealtimeTransportTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsInstance(failure, UpstreamResponseError)
                 self.assertEqual((failure.status, failure.headers.get("Retry-After")), (429, "7"))
 
-    async def test_reasoning_deltas_are_coalesced_before_visible_output(self):
+    async def test_realtime_streams_reasoning_while_compatible_coalesces(self):
         rows = [
             _line({"reasoning_content": "W"}),
             _line({"reasoning_content": "line"}),
@@ -654,47 +654,63 @@ class RealtimeTransportTests(unittest.IsolatedAsyncioTestCase):
             _line({}, "stop", {"prompt_tokens": 1, "completion_tokens": 4, "total_tokens": 5}),
             "data: [DONE]\n\n",
         ]
-        for protocol in ("chat", "responses", "messages"):
-            with self.subTest(protocol=protocol):
-                response = _FixedResponse(rows)
 
-                @asynccontextmanager
-                async def backend(*args, **kwargs):
-                    yield response
+        async def collected(protocol, mode):
+            response = _FixedResponse(rows)
 
-                path = {"chat": "/v1/chat/completions", "responses": "/v1/responses",
-                        "messages": "/v1/messages"}[protocol]
-                sent = await self.asgi_post(
-                    path, self.payload(protocol, False), backend,
-                    config={"stream_mode": "realtime"})
-                wire = b"".join(message.get("body", b"") for message in sent
-                                if message["type"] == "http.response.body")
-                if protocol == "chat":
-                    events = [json.loads(line[6:]) for line in wire.decode().splitlines()
-                              if line.startswith("data: ") and line[6:] != "[DONE]"]
-                    reasoning = [event["choices"][0]["delta"].get("reasoning_content")
-                                 for event in events
-                                 if event.get("choices") and event["choices"][0]["delta"].get("reasoning_content")]
-                    content = [event["choices"][0]["delta"].get("content")
-                               for event in events
-                               if event.get("choices") and event["choices"][0]["delta"].get("content")]
-                    self.assertEqual(reasoning, ["Wline478"])
-                    self.assertEqual(content, ["85", "done"])
-                    self.assertLess(
-                        next(i for i, event in enumerate(events)
-                             if event["choices"][0]["delta"].get("reasoning_content")),
-                        next(i for i, event in enumerate(events)
-                             if event["choices"][0]["delta"].get("content")))
-                elif protocol == "responses":
-                    events = _events(wire.decode())
-                    reasoning = [event["delta"] for event in events
-                                 if event["type"] == "response.reasoning_summary_text.delta"]
-                    self.assertEqual(reasoning, ["Wline478"])
-                else:
-                    blocks = _serial_blocks(self, wire.decode())
-                    self.assertEqual([block["type"] for block in blocks], ["thinking", "text"])
-                    self.assertEqual(blocks[0]["thinking"], "Wline478")
-                    self.assertEqual(blocks[1]["text"], "85done")
+            @asynccontextmanager
+            async def backend(*args, **kwargs):
+                yield response
+
+            path = {"chat": "/v1/chat/completions", "responses": "/v1/responses",
+                    "messages": "/v1/messages"}[protocol]
+            sent = await self.asgi_post(
+                path, self.payload(protocol, False), backend,
+                config={"stream_mode": mode})
+            return b"".join(message.get("body", b"") for message in sent
+                            if message["type"] == "http.response.body")
+
+        # Chat: realtime forwards each reasoning delta; compatible keeps one replay block.
+        wire = await collected("chat", "realtime")
+        events = [json.loads(line[6:]) for line in wire.decode().splitlines()
+                  if line.startswith("data: ") and line[6:] != "[DONE]"]
+        deltas = [event["choices"][0]["delta"] for event in events if event.get("choices")]
+        self.assertEqual([delta.get("reasoning_content") for delta in deltas if delta.get("reasoning_content")],
+                         ["W", "line", "478"])
+        self.assertEqual([delta.get("content") for delta in deltas if delta.get("content")],
+                         ["85", "done"])
+        first_reasoning = next(i for i, delta in enumerate(deltas) if delta.get("reasoning_content"))
+        first_content = next(i for i, delta in enumerate(deltas) if delta.get("content"))
+        self.assertLess(first_reasoning, first_content)
+
+        wire = await collected("chat", "compatible")
+        events = [json.loads(line[6:]) for line in wire.decode().splitlines()
+                  if line.startswith("data: ") and line[6:] != "[DONE]"]
+        deltas = [event["choices"][0]["delta"] for event in events if event.get("choices")]
+        self.assertEqual([delta.get("reasoning_content") for delta in deltas if delta.get("reasoning_content")],
+                         ["Wline478"])
+
+        # Responses: one logical reasoning item, delivered as incremental deltas.
+        wire = await collected("responses", "realtime")
+        events = _events(wire.decode())
+        reasoning = [event["delta"] for event in events
+                     if event["type"] == "response.reasoning_summary_text.delta"]
+        self.assertEqual(reasoning, ["W", "line", "478"])
+        response_items = [event["item"]["type"] for event in events
+                          if event["type"] == "response.output_item.done"]
+        self.assertEqual(response_items.count("reasoning"), 1)
+
+        # Messages: one thinking block, delivered as incremental deltas.
+        wire = await collected("messages", "realtime")
+        events = _events(wire.decode())
+        thinking = [event["delta"]["thinking"] for event in events
+                    if event["type"] == "content_block_delta"
+                    and event["delta"]["type"] == "thinking_delta"]
+        self.assertEqual(thinking, ["W", "line", "478"])
+        blocks = _serial_blocks(self, wire.decode())
+        self.assertEqual([block["type"] for block in blocks], ["thinking", "text"])
+        self.assertEqual(blocks[0]["thinking"], "Wline478")
+        self.assertEqual(blocks[1]["text"], "85done")
 
     async def test_hot_mode_change_affects_only_the_next_request(self):
         before, _ = await self.drive("responses", "realtime", True, change_to="compatible")

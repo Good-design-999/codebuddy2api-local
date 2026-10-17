@@ -3240,7 +3240,7 @@ def _network_error_text(error: Exception) -> str:
     return sanitize_log_text(f"{type(error).__name__}: {str(error).strip() or 'upstream transport failed'}", 512)
 
 async def _coalesce_reasoning_sse(lines, *, max_bytes=0):
-    """Coalesce normalized Chat SSE reasoning before downstream protocol adapters."""
+    """Replay one reasoning block for compatible mode; realtime skips this wrapper."""
     pending: list[str] = []
     template = None
     buffer_budget = StreamOutputBudget(max_bytes)
@@ -3583,9 +3583,11 @@ async def _stream_upstream(url: str, headers: dict, body: dict,
                            model_name: str = "?", t0: float = 0.0, rid: str = "", cred=None):
     policy = body.pop(_REQUEST_POLICY_KEY, None) or _snapshot_stream_policy("chat", body)
     sent = False
-    upstream = _coalesce_reasoning_sse(_chat_sse_lines(
-        url, headers, body, model_name, t0, rid, cred, policy=policy),
-        max_bytes=policy.max_collect_bytes)
+    # Realtime delivers every reasoning delta as it arrives; only compatible keeps the
+    # historical single-block replay that hides the reasoning timeline from clients.
+    upstream = _chat_sse_lines(url, headers, body, model_name, t0, rid, cred, policy=policy)
+    if not policy.realtime:
+        upstream = _coalesce_reasoning_sse(upstream, max_bytes=policy.max_collect_bytes)
     try:
         try:
             async for line in upstream:
@@ -4005,10 +4007,10 @@ async def _stream_adapted(url, headers, body, model_name, t0, rid, cred=None, *,
                                               parallel_tool_calls=body.get("parallel_tool_calls", True),
                                               tool_registry=tool_registry))
     sent = False
-    upstream = _coalesce_reasoning_sse(_chat_sse_lines(
-        url, headers, body, model_name, t0, rid, cred,
-        policy=policy, tracker=tracker, state=state),
-        max_bytes=policy.max_collect_bytes)
+    upstream = _chat_sse_lines(url, headers, body, model_name, t0, rid, cred,
+                               policy=policy, tracker=tracker, state=state)
+    if not policy.realtime:
+        upstream = _coalesce_reasoning_sse(upstream, max_bytes=policy.max_collect_bytes)
     try:
         try:
             async for line in upstream:

@@ -13,9 +13,6 @@ def main():
     subprocess.run(["uv", "export", "--locked", "--no-dev", "--no-emit-project",
                     "--format", "requirements-txt", "--output-file", "requirements.txt"],
                    cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
-    (ROOT / "requirements.in").write_text(
-        "# Generated from pyproject.toml by scripts/export_requirements.py; do not edit.\n"
-        + "\n".join(project["dependencies"]) + "\n")
 
 
 if __name__ == "__main__":

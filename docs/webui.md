@@ -16,7 +16,7 @@ Hover or tap the trend for the period's requests, successes and failures; keyboa
 
 ## Credentials
 
-Add accounts by browser login — Mainland China (CN), International WorkBuddy or International CodeBuddy — or import `.info`/ZIP files.
+Add accounts by browser login — Mainland China (CN), International WorkBuddy or International CodeBuddy — import `.info`/ZIP files, or paste up to 50 refresh tokens for one chosen endpoint; each token is exchanged serially and the returned account block keeps enterprise tenants intact.
 
 - **Runtime states:** distinguish manual disabling, credential-level authentication circuits and model-level 429 cooldowns. Disabling keeps files; deletion removes them and requires removing model bindings first. Exports preserve safe UTF-8 filenames (otherwise `credential.info`/`credentials.zip`) and contain plaintext credentials; do not share them.
 - **Login drawer:** successful OAuth enrollment closes the drawer and refreshes the list. The official tab keeps `noopener` isolation and must be closed manually. Failures stay visible; closing the drawer stops polling.
@@ -47,7 +47,7 @@ Clearing **all logs and statistics** is irreversible. Enter the confirmation tex
 
 ## Settings
 
-Edit unlocked options; hot changes apply immediately, while restart-marked settings require a manual restart. Change locked options in the startup configuration; see [configuration precedence](advanced.md#configuration-and-cli).
+Edit unlocked options; hot changes apply immediately, while restart-marked settings require a manual restart. Change locked options in the startup configuration; see [configuration precedence](advanced.md#configuration-and-cli). The Dashboard banner lists runtime keys still taken from `.env`; stop the service, migrate them with `python3 converter.py config migrate`, or dismiss the banner once — after either action it never returns, even if `.env` gains more keys.
 
 - "Keep tool descriptions" is off by default and works across all three protocols, independently of prompt compaction; see [tool metadata retention](advanced.md#tool-metadata-retention).
 - "Model capability preflight" defaults to on. Disabling it affects new requests only, not metadata display, international image-run merging or existing security limits; see [model declarations](advanced.md#model-declarations-and-image-compatibility).
@@ -57,7 +57,7 @@ Edit unlocked options; hot changes apply immediately, while restart-marked setti
 
 The sidebar remembers its icon-only mode. Drawers lock background scrolling, close on backdrop clicks or Esc, and restore focus; saves, imports and deletions prevent accidental dismissal while pending. Details use labeled fields and status groups with folded raw diagnostics. Glass surfaces fall back to solid colors when transparency is reduced or blur is unsupported.
 
-The appearance icon offers light, dark and system-following modes. Four palettes affect light mode only; dark mode stays fixed and the light preference is retained. Preferences are browser-local. Drawers fade/slide in and out, retaining the scroll lock through exit; reduced-motion settings skip animation.
+The appearance icon offers light, dark and system-following modes. Four palettes affect light mode only; dark mode stays fixed and the light preference is retained. Language is stored in the configuration store, so the CLI and every browser share it; other preferences stay browser-local. Drawers fade/slide in and out, retaining the scroll lock through exit; reduced-motion settings skip animation.
 
 ## Model mappings and statistics API
 

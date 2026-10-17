@@ -19,23 +19,19 @@ cd codebuddy2api
 cp .env.example .env
 ```
 
-编辑 `.env`：将 `CODEBUDDY2API_KEY` 设置为自己的随机密钥，并指定镜像；升级时保留已有 `.env`：
-
-```dotenv
-CODEBUDDY2API_IMAGE=ghcr.io/maiphucgiang/codebuddy2api:latest
-```
+编辑 `.env`：将 `CODEBUDDY2API_KEY` 设置为自己的随机密钥。Compose 会把整个文件加载进容器，每个键都会生效，无关的键也无影响。升级时保留已有 `.env`。
 
 ```bash
 docker compose pull
 docker compose up -d --no-build
 ```
 
-`latest` 跟随稳定发行版；需固定部署时改用已发布的版本标签。镜像功能以对应版本为准，不包含尚未合并的源码分支改动。
+Compose 默认拉取 `latest`（`CODEBUDDY2API_IMAGE=ghcr.io/maiphucgiang/codebuddy2api:latest`）；镜像同时发布发行版本（例如 `1.3.6`）与跟随 `main` 的 `edge`。需固定部署时改用版本标签；镜像功能以对应版本为准，不包含尚未合并的源码分支改动。
 
 首次使用：
 
 1. 打开 **http://127.0.0.1:8787/dashboard**，使用刚设置的 API key 登录。
-2. 在「凭证管理」扫码添加国内或国际账号，也可导入 `.info` 文件。
+2. 在「凭证管理」扫码添加国内或国际账号，也可导入 `.info` 文件，或按端点粘贴刷新令牌批量导入。
 3. 在「模型路由」查看可用模型，将其对外 ID 填入客户端。
 
 按模板配置时仅允许本机访问。远程访问前请配置 HTTPS 并限制网络访问；保留并妥善备份 `auth/` 数据目录。如需直接运行源码或在终端登录，见[部署指南](docs/deployment.zh-CN.md)。
@@ -82,7 +78,7 @@ docker compose up -d --no-build
 ## 常见问题
 
 - **绑定域名后经 HTTPS 反代无法登录 WebUI？** 将对外来源加入 `admin_allowed_origins` 信任列表——见[管理 Origin 校验](docs/advanced.zh-CN.md#管理-origin--csrf-开关)。
-- **没有 Docker？** 准备依赖和 WebUI 后，直接 `uv run converter.py` 或 `python3 converter.py`，无需 `.env`；首次本地启动保存默认 key 并仅在终端显示一次——见[本地 Python 运行](docs/deployment.zh-CN.md#本地-python-运行)。
+- **没有 Docker？** 准备依赖和 WebUI 后，直接 `uv run --locked --no-build converter.py` 或 `python3 converter.py`，无需 `.env`；首次本地启动保存默认 key 并仅在终端显示一次——见[本地 Python 运行](docs/deployment.zh-CN.md#本地-python-运行)。
 - **数据在哪里？** 全部位于 `auth/`（Docker 中为 `/data/auth`）：凭证、设置与日志数据库——见[数据与备份](docs/webui.zh-CN.md#数据与备份)。
 - **镜像标签怎么选？** `latest` 跟随稳定版，`edge` 跟随 main，版本标签固定某一发行版——见[使用已发布镜像](docs/deployment.zh-CN.md#使用已发布镜像)。
 - **Responses 工具输出/参数被压缩或需要完全原样？** 设置 `responses_projection_mode`（默认 `balanced`，设 `passthrough` 可完全关闭投影）及 `responses_projection_max_bytes`（默认 `40000`，`0` 禁用单项裁剪）。balanced 裁剪保留头尾并显示原始 bytes、估算 tokens 与总行数，客户端地址不变——见 [Responses 投影](docs/clients.zh-CN.md#responses-投影)及[详细说明](docs/advanced.zh-CN.md#responses-投影)。

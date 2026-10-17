@@ -88,6 +88,7 @@ $white: var(--page);
   color: $ink;
   padding: 9px 11px;
   min-width: 0;
+  max-width: 100%;
   min-height: 38px;
 }
 :global(input::placeholder) {
@@ -535,14 +536,16 @@ $white: var(--page);
   display: inline-block;
 }
 .moreMenuList {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 4px);
+  /* Fixed so an open menu is never clipped by a scrolling table or panel. */
+  position: fixed;
   z-index: 40;
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 128px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow: auto;
   padding: 6px;
   background: var(--surface);
   border: 1px solid var(--line);
@@ -1192,6 +1195,8 @@ $white: var(--page);
   padding: 0 22px 14px;
   font-size: 10px;
   color: $muted;
+  /* The expanded data table is wider than a narrow panel; scroll it instead of clipping. */
+  overflow-x: auto;
 }
 .chartData summary {
   cursor: pointer;
@@ -1625,6 +1630,8 @@ $white: var(--page);
 }
 .tabs {
   display: flex;
+  flex-wrap: wrap;
+  row-gap: 6px;
   gap: 6px;
   border-bottom: 1px solid $line;
   margin-bottom: 20px;
@@ -2806,9 +2813,10 @@ $white: var(--page);
   }
   .sidebar nav {
     display: flex;
+    flex-wrap: wrap;
     margin-top: 14px;
     gap: 4px;
-    overflow: auto;
+    overflow: visible;
   }
   .navItem {
     font-size: 11px;

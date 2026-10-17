@@ -19,23 +19,19 @@ cd codebuddy2api
 cp .env.example .env
 ```
 
-Edit `.env`: set `CODEBUDDY2API_KEY` to your own random key and pick the image. Preserve an existing `.env` on upgrades:
-
-```dotenv
-CODEBUDDY2API_IMAGE=ghcr.io/maiphucgiang/codebuddy2api:latest
-```
+Edit `.env`: set `CODEBUDDY2API_KEY` to your own random key. Compose loads the whole file into the container, so every key applies and unknown keys are harmless. Preserve an existing `.env` on upgrades.
 
 ```bash
 docker compose pull
 docker compose up -d --no-build
 ```
 
-`latest` tracks stable releases; pin a published version tag for reproducible deployments. Image features belong to that version, not to unmerged source branches.
+Compose pulls `latest` by default (`CODEBUDDY2API_IMAGE=ghcr.io/maiphucgiang/codebuddy2api:latest`); images also publish the release version (for example `1.3.6`) and `edge` for `main`. Pin a version tag for reproducible deployments; image features belong to that version, not to unmerged source branches.
 
 First use:
 
 1. Open **http://127.0.0.1:8787/dashboard** and sign in with your API key.
-2. In **Credentials**, add a domestic or international account through browser login, or import an `.info` file.
+2. In **Credentials**, add a domestic or international account through browser login, import an `.info` file, or paste refresh tokens for a chosen endpoint.
 3. In **Models**, find an available model and use its public ID in your client.
 
 The template binds to localhost only. Configure HTTPS and restrict network access before allowing remote connections; keep and securely back up the `auth/` data directory. To run current source or log in from a terminal instead, see the [deployment guide](docs/deployment.md).
@@ -82,7 +78,7 @@ The template binds to localhost only. Configure HTTPS and restrict network acces
 ## FAQ
 
 - **WebUI sign-in fails behind an HTTPS domain/reverse proxy?** Trust your public origin via `admin_allowed_origins` — see [Management Origin checks](docs/advanced.md#management-origin--csrf-switch).
-- **No Docker?** After installing dependencies and the WebUI, run `uv run converter.py` or `python3 converter.py` without `.env`. First local startup saves a default key and displays it once — see [Local Python setup](docs/deployment.md#local-python-setup).
+- **No Docker?** After installing dependencies and the WebUI, run `uv run --locked --no-build converter.py` or `python3 converter.py` without `.env`. First local startup saves a default key and displays it once — see [Local Python setup](docs/deployment.md#local-python-setup).
 - **Where is my data?** Everything lives in `auth/` (or `/data/auth` in Docker): credentials, settings and log databases — see [Data and backups](docs/webui.md#data-and-backups).
 - **Which image tag should I use?** `latest` follows stable releases, `edge` follows main, version tags pin one release — see [Published images](docs/deployment.md#use-published-images).
 - **Responses tool output/arguments compressed or need verbatim passthrough?** Set `responses_projection_mode` (default `balanced`, or `passthrough` to disable projection) and `responses_projection_max_bytes` (default `40000`, `0` disables per-item trimming). Balanced trimming keeps the head/tail and reports original bytes, estimated tokens and total lines; client addresses stay unchanged — see [Responses projection](docs/clients.md#responses-projection) and [details](docs/advanced.md#responses-projection).

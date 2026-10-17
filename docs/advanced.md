@@ -8,7 +8,11 @@ Use the [WebUI](webui.md) for everyday management. See [deployment](deployment.m
 
 Precedence: **explicit CLI flags > process environment > `.env` > saved SQLite settings > defaults**. Hot settings apply immediately; restart-marked settings require a manual restart. Change locked options at their source; the WebUI does not edit `.env` or expose API keys.
 
-Compose explicitly passes some environment variables and CLI flags, so deleting a line from `.env` may not unlock it. Recreate the container after changing these values; to let the WebUI manage them, also remove the corresponding explicit Compose settings.
+Compose loads every key in `.env` into the container, so commenting out a line is enough to unlock it; only `CODEBUDDY_AUTH_DIR` and `CODEBUDDY2API_ALLOW_OPEN_NOAUTH` are fixed by the Compose file. Recreate the container after changing these values.
+
+Runtime keys in `.env` stay read-only in the WebUI until they are moved into the configuration store: stop the service and run `python3 converter.py config migrate` (see [configuration migration](deployment.md#configuration-migration)). The Dashboard shows a one-time banner listing those keys; migrating or pressing "Do not remind me" records `config_notice_muted` in the store and stops the reminder, including for later `.env` additions.
+
+`language` (`auto|zh|en`) is the only interface preference the WebUI and the CLI share: it has no environment mapping and is never locked. `--lang` writes it on `serve`, `login` and `config migrate`; `config status` is read-only and only affects that invocation's output.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -45,11 +49,11 @@ Compose explicitly passes some environment variables and CLI flags, so deleting 
 | `--max-request-bytes` | `33554432` | Positive byte limit for processed upstream JSON, excluding gateway-only metadata |
 | `--log-body-limit` | `65536` | Legacy text-preview option; text output is retired and SQLite diagnostics use their own budget |
 
-Environment variables include `CODEBUDDY_AUTH_DIR`, `CODEBUDDY_IMPORT_DIR`, `CODEBUDDY2API_KEY`, `CODEBUDDY2API_ADMIN_CSRF`, `CODEBUDDY2API_ADMIN_ORIGINS`, `CODEBUDDY2API_KEEP_TOOL_METADATA`, `CODEBUDDY2API_STREAM_MODE`, `CODEBUDDY2API_LOG`, `CODEBUDDY2API_RESPONSES_PROJECTION_MODE`, `CODEBUDDY2API_RESPONSES_PROJECTION_MAX_BYTES`, `CODEBUDDY2API_MAX_IMAGES`, `CODEBUDDY2API_IMAGE_POLICY`, `CODEBUDDY2API_MAX_REQUEST_BYTES`, `CODEBUDDY2API_LOG_BODY_LIMIT`, `CODEBUDDY2API_FAILOVER_MAX` and `CODEBUDDY2API_RETRY_WRITE_TIMEOUT`. See [deployment](deployment.md) for startup examples.
+Every active environment variable is listed with its default in `.env.example`; startup examples are in [deployment](deployment.md).
 
 ### Responses projection
 
-Configure these hot settings through the WebUI, CLI, process environment or `.env`. Precedence is CLI > process environment > `.env` > saved SQLite value > default; CLI/environment values lock the WebUI fields. Compose forwards a variable only when the host environment sets it, so leaving both unset keeps the WebUI editable.
+Configure these hot settings through the WebUI, CLI, process environment or `.env`. Precedence is CLI > process environment > `.env` > saved SQLite value > default; CLI/environment values lock the WebUI fields. Compose loads `.env` wholesale, so a commented-out line keeps the WebUI editable.
 
 `responses_projection_mode` defaults to `balanced` and accepts only `balanced` or `passthrough`. Balanced mode rewrites only recognized harness blocks that have stable summaries; text outside those blocks is not budgeted or truncated. It also applies Codex-style head/tail truncation to generated assistant content, complete tool-argument JSON and tool results according to `responses_projection_max_bytes`. Text markers report original bytes, estimated tokens and total lines. Oversized tool arguments remain valid JSON and use a bounded object containing the original head, tail and size metadata. Passthrough disables Responses projection completely.
 
@@ -63,16 +67,16 @@ Responses projection no longer changes tool definitions or schemas. When desensi
 
 - **WebUI:** Settings → Keep tool descriptions; unlocked changes apply immediately and persist.
 - **CLI:** append `--keep-tool-metadata` or `--keep-tool-metadata true` to the existing command; explicit `false` overrides the environment.
-- **Environment:** set `CODEBUDDY2API_KEEP_TOOL_METADATA=true`. Compose passes it only when set, leaving the WebUI unlocked otherwise. Remove or comment out the variable to remove the environment lock; do not set an empty string.
+- **Environment:** set `CODEBUDDY2API_KEEP_TOOL_METADATA=true` in `.env`; comment the line out to remove the lock, and do not set an empty string.
 
-Use a source/image build and Compose configuration containing this feature; recreate containers after changing its environment. Retained descriptions may increase input tokens and content-filter risk; set `false` to restore the desensitization default. This setting does not change Responses balanced/passthrough mode or relax request-size limits.
+Use an image or source build containing this feature; recreate the container after changing its environment. Retained descriptions may increase input tokens and content-filter risk; set `false` to restore the desensitization default. This setting does not change Responses balanced/passthrough mode or relax request-size limits.
 
 ### Streaming modes
 
 `stream_mode` defaults to `compatible`. Configure it through `--stream-mode compatible|realtime`, `CODEBUDDY2API_STREAM_MODE`, or the WebUI enum; explicit CLI/environment sources lock that field. Every generation request, including non-streaming, records the selected mode and freezes it with `max_collect_bytes` before routing. Hot changes affect only later requests, not in-flight failovers. Non-streaming responses remain aggregated JSON; there is no client mode override.
 
 - `compatible` preserves existing behavior: Responses streams aggregate first; Chat and Messages aggregate when tools are present and otherwise pass through upstream increments. Aggregated output is validated and replayed in fragments. Non-stream requests always use the validated aggregate path in either mode.
-- `realtime` forwards text, refusal and tool-argument increments for all three protocols, while coalescing reasoning fragments into one delta before visible output so clients keep one thinking section. Responses assigns stable indexes when items start; Anthropic uses stable block indexes. Adapters buffer tools with missing identity until the argument phase or terminal marker, append metadata fragments without guessing from prefixes, and reject identity changes after an item starts. `max_collect_bytes` bounds retained UTF-8 output; `0` disables that limit.
+- `realtime` forwards text, refusal, tool-argument and reasoning increments for all three protocols as they arrive, so reasoning timing stays visible to clients; Responses and Anthropic still deliver one logical thinking item/block with stable indexes. `compatible` keeps the older behaviour of coalescing reasoning into one delta before the first visible output, which hides the reasoning timeline and can inflate client-side TPS/TTFT. Adapters buffer tools with missing identity until the argument phase or terminal marker, append metadata fragments without guessing from prefixes, and reject identity changes after an item starts. `max_collect_bytes` bounds retained UTF-8 output; `0` disables that limit.
 
 Realtime Messages keeps one content block open at a time. The active tool remains incremental; later tool, text or thinking blocks may wait until upstream completion. Deferred event bytes share `max_collect_bytes`. A tool still awaiting its identity does not block unrelated text before its block starts.
 
@@ -119,7 +123,7 @@ Older strict setting validators reject the unknown saved key, so changing only i
 
 ### Connection reuse and account capacity
 
-Both settings are available in the WebUI; their environment variables are `CODEBUDDY2API_UPSTREAM_KEEPALIVE` and `CODEBUDDY2API_MAX_INFLIGHT_PER_ACCOUNT`. Unset variables leave Compose settings unlocked. Connection reuse defaults to off; when enabled, each official origin permits 64 connections with 16 idle connections and a 30-second keepalive expiry. Authentication is request-scoped, upstream cookies are not stored, and shutdown closes the pools. Proxy environment, timeouts and replay rules are unchanged; disable and restart to restore fresh connections.
+Both settings are available in the WebUI; their environment variables are `CODEBUDDY2API_UPSTREAM_KEEPALIVE` and `CODEBUDDY2API_MAX_INFLIGHT_PER_ACCOUNT`. Commenting a line out of `.env` keeps the WebUI in control. Connection reuse defaults to off; when enabled, each official origin permits 64 connections with 16 idle connections and a 30-second keepalive expiry. Authentication is request-scoped, upstream cookies are not stored, and shutdown closes the pools. Proxy environment, timeouts and replay rules are unchanged; disable and restart to restore fresh connections.
 
 The account limit defaults to `0`. Positive limits skip full accounts within existing routing and free-first rules; a full free tier never spills into paid accounts. No capacity returns `503 / credential_concurrency_limit` with `Retry-After: 3`, without queueing or penalizing the account. Completion, cancellation and failed-account rotation release capacity. The credentials API exposes `in_flight` and `max_in_flight`. Only the three client generation endpoints count; limits are per process, not shared between instances. Setting `0` restores unlimited account capacity without interrupting active requests.
 
@@ -193,7 +197,7 @@ Normal same-origin access does not require disabling protection. Behind a revers
 CODEBUDDY2API_ADMIN_CSRF=false
 ```
 
-This is startup-only, CLI takes precedence over the environment, and the WebUI cannot change it. Use a source/image build containing this option and the updated Compose configuration. Recreate the container after changing its environment; `docker compose restart` alone is insufficient. Adding the variable does not add this feature to an older image.
+This is startup-only, CLI takes precedence over the environment, and the WebUI cannot change it. Write the value in `.env` or pass the flag, then recreate the container; `docker compose restart` alone is insufficient.
 
 Disabling skips login Origin checks and Origin/CSRF checks on Cookie-authenticated management writes and OAuth polling. API keys, session expiry, OAuth task ownership, official authorization-site validation and dangerous-action confirmations remain enforced; `/v1/*` is unaffected.
 

@@ -560,6 +560,79 @@ class AdminApiTests(unittest.TestCase):
         self.assertNotIn("refresh_token", saved["auth"])
         self.assertNotIn("token", saved["auth"])
 
+    def refresh_token(self, uid):
+        import base64
+        claims = base64.urlsafe_b64encode(json.dumps({"sub": uid}).encode()).decode().rstrip("=")
+        return f"header.{claims}.signature"
+
+    def test_refresh_import_rejects_bad_endpoint_and_batches(self):
+        post = lambda body: self.client.post("/admin/credentials/refresh-import", headers=self.headers, json=body)
+        self.assertEqual(post({"profile": "unknown", "refresh_tokens": ["a"]}).status_code, 400)
+        for tokens in ([], [""], [1], ["x" * 8193], ["a"] * 51):
+            with self.subTest(count=len(tokens)):
+                self.assertEqual(post({"profile": "cn-work", "refresh_tokens": tokens}).status_code, 400)
+        self.gateway._store_credential.assert_not_called()
+
+    def test_refresh_import_isolates_failures_and_dedupes_tokens(self):
+        from app import admin_api
+        from unittest.mock import patch
+        calls = []
+
+        def fake(token, profile, *, uid=""):
+            calls.append((token, profile, uid))
+            if uid == "uid-2":
+                raise RuntimeError("刷新令牌已失效或端点不匹配")
+            return {"accessToken": "synthetic-access", "refreshToken": "synthetic-refresh",
+                    "expiresIn": 3600, "domain": "www.workbuddy.cn"}
+
+        tokens = [self.refresh_token("uid-1"), self.refresh_token("uid-2"), "not-a-jwt",
+                  self.refresh_token("uid-1")]
+        def fake_account(token, domain):
+            return {"uid": "uid-1", "type": "ultimate", "enterpriseId": "tenant-7", "nickname": "企业账号"}
+
+        tokens = [self.refresh_token("uid-1"), self.refresh_token("uid-2"), "not-a-jwt",
+                  self.refresh_token("uid-1")]
+        self.gateway._store_credential.side_effect = lambda directory, name, content, uid, **kw: Path(directory) / name
+        with patch.object(admin_api.auth_oauth, "refresh_tokens", side_effect=fake), \
+                patch.object(admin_api.auth_oauth, "fetch_account", side_effect=fake_account):
+            response = self.client.post("/admin/credentials/refresh-import", headers=self.headers,
+                                        json={"profile": "cn-work", "refresh_tokens": tokens})
+        self.assertEqual(response.status_code, 200, response.text)
+        rows = response.json()["results"]
+        self.assertEqual([row["ok"] for row in rows], [True, False, False])
+        self.assertEqual(rows[0]["name"], "uid-1.info")
+        self.assertIn("失效", rows[1]["error"])
+        self.assertIn("sub", rows[2]["error"])
+        self.assertEqual([call[2] for call in calls], ["uid-1", "uid-2"])
+        self.gateway._store_credential.assert_called_once()
+        saved = json.loads(self.gateway._store_credential.call_args.args[2].decode("utf-8"))
+        self.assertEqual(saved["auth"]["accessToken"], "synthetic-access")
+        self.assertEqual(saved["auth"]["domain"], "www.workbuddy.cn")
+        self.assertEqual(saved["account"]["uid"], "uid-1")
+        # The account block supplies the tenant, so enterprise credentials must not fall back to a bare uid.
+        self.assertEqual(saved["account"]["enterpriseId"], "tenant-7")
+        self.assertEqual(saved["account"]["type"], "ultimate")
+        self.assertNotIn("synthetic-access", response.text)
+
+    def test_config_notice_lists_runtime_env_and_dismissal_persists(self):
+        from unittest.mock import patch
+        self.store.update_settings({"config_notice_muted": False}, self.store.snapshot()["revision"])
+        # Each dashboard build must start from a fresh payload, not the mocked shared dict.
+        self.audit.dashboard.side_effect = lambda *args, **kwargs: {
+            "summary": {}, "series": [], "models": [], "profiles": []}
+        with patch.dict("os.environ", {"CODEBUDDY2API_MAX_IMAGES": "8", "CODEBUDDY2API_BIND": "0.0.0.0"}):
+            dashboard = self.client.get("/admin/dashboard", headers=self.headers)
+            notice = dashboard.json()["config_notice"]
+            self.assertEqual(notice["count"], 1)
+            self.assertEqual(notice["items"][0]["key"], "max_images")
+            self.assertIn("config migrate", notice["command"])
+            dismissed = self.client.post("/admin/config-notice/dismiss", headers=self.headers, json={})
+            self.assertEqual(dismissed.status_code, 200, dismissed.text)
+            self.assertTrue(self.store.snapshot()["settings"]["config_notice_muted"])
+            again = self.client.get("/admin/dashboard", headers=self.headers)
+            self.assertNotIn("config_notice", again.json())
+        self.assertEqual(self.client.post("/admin/config-notice/dismiss").status_code, 401)
+
     def test_export_only_selected_info_and_symlink_identity_protection(self):
         content = json.dumps(self.credential())
         (self.root / "first.info").write_text(content)

@@ -56,6 +56,11 @@ def _auth_headers(auth: dict, account: dict) -> dict:
 def credential_headers(auth: dict, account: dict) -> dict:
     return {**SDK_HEADERS, **_auth_headers(auth, account)}
 
+def refresh_headers(domain: str, uid: str = "") -> dict:
+    """Build headers for a refresh exchange that has no access token yet."""
+    headers = {**SDK_HEADERS, **_auth_headers({"accessToken": "", "domain": domain}, {"uid": uid})}
+    headers.pop("Authorization", None)  # The refresh token is the only credential in this request.
+    return headers
 
 def catalog_headers(auth: dict, account: dict | None = None, *, user_agent="") -> dict:
     headers = _auth_headers(auth, account or {})

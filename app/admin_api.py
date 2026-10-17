@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import OrderedDict
 import io
 import json
+import os
 from pathlib import Path
 import threading
 import time
@@ -20,6 +21,7 @@ from .admin_auth import AdminAuth, AdminMiddleware, COOKIE_NAME, SESSION_TTL, er
 from .control_store import ConflictError, validate_model
 from .credential_io import CredentialFileError, MAX_CREDENTIAL_BYTES, _valid_name, read_import_file
 from .settings import SCHEMA, resolve_settings, validate_settings
+from .site_routing import PROFILE_DOMAINS
 
 MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 CLEAR_CONFIRMATION = "清空全部日志与统计"
@@ -119,6 +121,20 @@ def install_admin(app, config, gateway):
                       "mode": "startup", "type": "boolean", "label": "全部国内账号首次领猫预授权", "locked": True})
         return {"revision": control.snapshot()["revision"], "items": items, "audit": audit.storage(),
                 "session": auth.storage()}
+
+    def config_notice():
+        """List runtime settings still supplied by the environment, until the user migrates or mutes."""
+        if config.get("config_notice_muted"):
+            return None
+        items = [{"key": key, "label": spec["label"]}
+                 for key, spec in SCHEMA.items()
+                 if spec.get("env") and spec.get("env_scope") == "runtime"
+                 and not spec.get("hidden") and not spec.get("sensitive")
+                 and spec["env"] in os.environ]
+        if not items:
+            return None
+        return {"count": len(items), "items": items,
+                "command": "python3 converter.py config migrate"}
 
     def audit_settings(values):
         mapping = {"audit_max_bytes": "max_bytes", "audit_retention_days": "retention_days",
@@ -284,6 +300,22 @@ def install_admin(app, config, gateway):
             for key in values:
                 event("settings.updated", {"code": key})
             return JSONResponse(settings_result())
+        return await run_in_threadpool(apply)
+
+    @route("POST", "/admin/config-notice/dismiss")
+    async def config_notice_dismiss(request):
+        body = await _body(request)
+
+        def apply():
+            with mutation_lock:
+                revision = body.get("revision")
+                if not isinstance(revision, int):
+                    revision = control.snapshot()["revision"]
+                control.update_settings({"config_notice_muted": True}, revision)
+                config["config_notice_muted"] = True
+                config.setdefault("settings_sources", {})["config_notice_muted"] = "management"
+            event("config.notice_dismissed")
+            return JSONResponse({"muted": True, "revision": revision + 1})
         return await run_in_threadpool(apply)
 
     @route("GET", "/admin/models")
@@ -459,6 +491,68 @@ def install_admin(app, config, gateway):
         body = await _body(request, MAX_UPLOAD_BYTES * 6 + 65536)
         return JSONResponse({"results": await run_in_threadpool(upload, body)})
 
+    refresh_lock = threading.Lock()
+
+    def refresh_import(body):
+        profile = body.get("profile")
+        if profile not in PROFILE_DOMAINS:
+            raise ValueError("端点必须为 cn-cli、cn-work、intl-cli 或 intl-work")
+        tokens = body.get("refresh_tokens")
+        if not isinstance(tokens, list) or not 1 <= len(tokens) <= 50:
+            raise ValueError("refresh_tokens 必须包含 1 至 50 项")
+        lines = []
+        for item in tokens:
+            if not isinstance(item, str):
+                raise ValueError("每项必须是一个刷新令牌字符串")
+            token = item.strip()
+            if not token:
+                continue
+            if len(token) > 8192:
+                raise ValueError("刷新令牌长度超出限制")
+            if token not in lines:
+                lines.append(token)
+        if not lines:
+            raise ValueError("至少需要一个刷新令牌")
+        results = []
+        directory = gateway.managed_auth_dir().resolve()
+        # Serialize the whole batch: parallel refreshes would trip upstream risk control.
+        with refresh_lock:
+            for token in lines:
+                uid = auth_oauth.token_uid(token)
+                try:
+                    if not uid:
+                        raise ValueError("刷新令牌缺少账号身份（sub）")
+                    payload = auth_oauth.refresh_tokens(token, profile, uid=uid)
+                    account = auth_oauth.fetch_account(payload["accessToken"], PROFILE_DOMAINS[profile])
+                    if account["uid"] != uid:
+                        raise ValueError("账号信息与刷新令牌不一致")
+                    cred = auth_oauth.build_auth_file(payload, account)
+                    invalid = auth_oauth.validate_cred_data(cred)[1]
+                    if invalid:
+                        raise ValueError(invalid)
+                    content = json.dumps(auth_oauth.normalize_cred_data(cred), ensure_ascii=False).encode("utf-8")
+                    # Keep a product-specific name when the same account already exists for another endpoint.
+                    name = f"{uid}.info"
+                    if (directory / name).exists():
+                        name = f"{uid}-{profile}.info"
+                    target = gateway._store_credential(directory, name, content, uid, replace_existing=False)
+                    results.append({"ok": True, "name": Path(target).name, "uid": uid, "profile": profile})
+                except (ValueError, RuntimeError) as error:
+                    results.append({"ok": False, "name": uid or "未知账号", "uid": uid or None,
+                                    "profile": profile, "error": str(error)})
+                except Exception:
+                    results.append({"ok": False, "name": uid or "未知账号", "uid": uid or None,
+                                    "profile": profile, "error": "刷新或保存失败，请检查网络与存储状态"})
+        event("credentials.refresh_imported",
+              {"profile": profile, "count": len(results), "succeeded": sum(item["ok"] for item in results)})
+        return results
+
+    @route("POST", "/admin/credentials/refresh-import")
+    async def credentials_refresh_import(request):
+        # 50 tokens of at most 8 KiB each, with JSON escaping, stay under 1 MiB.
+        body = await _body(request, 1024 * 1024)
+        return JSONResponse({"results": await run_in_threadpool(refresh_import, body)})
+
     def export(body):
         ids = body.get("ids")
         if body.get("confirm") is not True or not isinstance(ids, list) or not 1 <= len(ids) <= 100 or any(not isinstance(i, str) for i in ids):
@@ -586,6 +680,9 @@ def install_admin(app, config, gateway):
             result["official_credits"] = {row["id"]: {"credits": row.get("credits"), "name": row.get("name"),
                                                         "fetched_at": (row.get("credits") or {}).get("fetched_at")}
                                           for row in rows}
+            notice = config_notice()
+            if notice:
+                result["config_notice"] = notice
             return result
         result = await run_in_threadpool(build_dashboard)
         return result if isinstance(result, Response) else JSONResponse(result)

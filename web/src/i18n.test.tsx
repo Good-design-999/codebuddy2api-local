@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
-import { chooseLanguage, LanguageProvider, translate, useT } from "./i18n";
+import { chooseLanguage, LanguageProvider, serverPreference, translate, useT } from "./i18n";
 
 beforeEach(() => {
   try {
@@ -62,5 +62,15 @@ describe("i18n", () => {
     fireEvent.click(document.querySelector('input[name="ui-language"][value="system"]')!);
     expect(localStorage.getItem("codebuddy2api.lang")).toBe("system");
     expect(screen.getByTestId("probe").textContent).toBe("Overview");
+  });
+});
+
+describe("stored language preference", () => {
+  it("maps stored values onto UI preferences", () => {
+    expect(serverPreference("zh")).toBe("zh");
+    expect(serverPreference("en")).toBe("en");
+    expect(serverPreference("auto")).toBe("system");
+    expect(serverPreference(undefined)).toBe("system");
+    expect(serverPreference("klingon")).toBe("system");
   });
 });

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, Navigate, Outlet, Route, Routes, useLocation } from "react-router";
-import { api, establishSession, errorMessage, useSession } from "./api";
+import { api, establishSession, errorMessage, list, object, useSession } from "./api";
 import { ErrorNotice, Icon } from "./components";
 import { Dashboard } from "./pages/Dashboard";
 import { Models } from "./pages/Models";
@@ -10,7 +10,7 @@ import { Settings } from "./pages/Settings";
 import { Storage } from "./pages/Storage";
 import { Appearance } from "./appearance";
 import s from "./ui.module.scss";
-import { LanguageProvider, useT } from "./i18n";
+import { LanguageProvider, chooseLanguage, serverPreference, useT } from "./i18n";
 
 const navigation = [
   ["", "nav.overview", "grid"],
@@ -239,6 +239,19 @@ export default function App() {
   useEffect(() => {
     void establishSession();
   }, []);
+  const status = useSession((state) => state.status);
+  useEffect(() => {
+    if (status !== "authenticated") return;
+    // The stored language wins over the browser cache once the session is known.
+    void api
+      .get<unknown>("/settings")
+      .then((response) => {
+        const data = object(response.data);
+        const stored = list(data.items).find((item) => item.key === "language");
+        if (stored) chooseLanguage(serverPreference(stored.value));
+      })
+      .catch(() => undefined);
+  }, [status]);
   return (
     <LanguageProvider>
       <AppRoutes />

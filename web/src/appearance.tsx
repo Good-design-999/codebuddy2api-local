@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { create } from "zustand";
+import { api, object } from "./api";
 import { Drawer, DrawerPresence, Icon } from "./components";
 import { chooseLanguage, languagePreference, useT, type LangPref } from "./i18n";
 import s from "./ui.module.scss";
@@ -152,7 +153,20 @@ export function Appearance() {
                     name="ui-language"
                     value={value}
                     checked={languagePreference() === value}
-                    onChange={() => chooseLanguage(value)}
+                    onChange={() => {
+                      chooseLanguage(value);
+                      // Persist through the API so the CLI and other browsers share it.
+                      void api
+                        .get<unknown>("/settings")
+                        .then((response) => {
+                          const data = object(response.data);
+                          return api.patch("/settings", {
+                            values: { language: value === "system" ? "auto" : value },
+                            revision: data.revision,
+                          });
+                        })
+                        .catch(() => undefined);
+                    }}
                   />
                   <span className={s.langDot}>{label}</span>
                 </label>

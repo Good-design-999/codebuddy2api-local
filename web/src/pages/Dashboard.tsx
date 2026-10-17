@@ -1,8 +1,21 @@
 import { useState } from "react";
-import { list, metric, number, object, text, useResource, type RecordValue } from "../api";
+import {
+  api,
+  errorMessage,
+  list,
+  metric,
+  number,
+  object,
+  text,
+  useResource,
+  type RecordValue,
+} from "../api";
 import {
   Badge,
+  Drawer,
+  DrawerPresence,
   Empty,
+  ErrorNotice,
   Fields,
   Icon,
   PageTitle,
@@ -20,6 +33,7 @@ function normalize(value: unknown): RecordValue & {
   health: RecordValue;
   storage: RecordValue;
   range: RecordValue;
+  config_notice: RecordValue | null;
 } {
   const d = object(value);
   for (const field of ["series", "models", "profiles"]) {
@@ -37,6 +51,10 @@ function normalize(value: unknown): RecordValue & {
     health: object(d.health, "健康状态"),
     storage: object(d.storage, "存储状态"),
     range: d.range === undefined ? {} : object(d.range, t("dash.window")),
+    config_notice:
+      d.config_notice === undefined || d.config_notice === null
+        ? null
+        : object(d.config_notice, t("dash.configNoticeTitle")),
   };
 }
 function Health({ data }: { data: RecordValue }) {
@@ -116,11 +134,99 @@ function OfficialCredits({ value }: { value: unknown }) {
 }
 import { KpiCards, UsageTrend } from "../UsageOverview";
 import { t, useT } from "../i18n";
+
+function ConfigNotice({ notice, onDismiss }: { notice: RecordValue; onDismiss: () => void }) {
+  const t = useT();
+  const [copied, setCopied] = useState(false);
+  const items = list(notice.items, t("dash.configNoticeTitle"));
+  const keys = items.map((item) => text(item.key)).join("、");
+  const command = text(notice.command);
+  const count = number(notice.count) ?? items.length;
+  return (
+    <div className={s.warning} role="status">
+      <Icon name="alert" />
+      <div>
+        <strong>{t("dash.configNoticeTitle")}</strong>
+        <p>{t("dash.configNoticeBody", { count: String(count), keys })}</p>
+        <p className={s.note}>
+          <code>{command}</code>
+        </p>
+        <div className={s.actions}>
+          <button
+            type="button"
+            onClick={() => {
+              const clipboard = navigator.clipboard;
+              if (!clipboard) return;
+              void clipboard.writeText(command).then(
+                () => setCopied(true),
+                () => setCopied(false),
+              );
+            }}
+          >
+            {copied ? t("dash.configNoticeCopied") : t("dash.configNoticeCopy")}
+          </button>
+          <button type="button" onClick={onDismiss}>
+            {t("dash.configNoticeDismiss")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConfigNoticeConfirm({
+  notice,
+  onClose,
+  onDismissed,
+}: {
+  notice: RecordValue;
+  onClose: () => void;
+  onDismissed: () => void;
+}) {
+  const t = useT();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const count = number(notice.count) ?? list(notice.items).length;
+  return (
+    <Drawer title={t("dash.configNoticeConfirmTitle")} onClose={onClose} dismissDisabled={busy}>
+      <div className={s.warning}>
+        <Icon name="alert" />
+        <div>
+          <strong>{t("dash.configNoticeConfirmStrong", { count: String(count) })}</strong>
+          <p>{t("dash.configNoticeConfirmBody", { count: String(count) })}</p>
+        </div>
+      </div>
+      <ErrorNotice message={error} />
+      <div className={s.actions}>
+        <button type="button" disabled={busy} onClick={onClose}>
+          {t("dash.configNoticeCancel")}
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => {
+            setBusy(true);
+            setError(null);
+            void api
+              .post("/config-notice/dismiss", {})
+              .then(() => onDismissed())
+              .catch((err: unknown) => setError(errorMessage(err)))
+              .finally(() => setBusy(false));
+          }}
+        >
+          {busy ? t("dash.configNoticeConfirming") : t("dash.configNoticeConfirm")}
+        </button>
+      </div>
+    </Drawer>
+  );
+}
 export { Trend } from "../Trend";
 export function Dashboard() {
   const t = useT();
   const [days, setDays] = useState("7");
   const [granularity, setGranularity] = useState("auto");
+  const [noticeHidden, setNoticeHidden] = useState(false);
+  const [confirmingNotice, setConfirmingNotice] = useState(false);
   const resource = useResource(`/dashboard?days=${days}&granularity=${granularity}`, normalize);
   // Hourly buckets power the trend's zoom-in granularity swap.
   const hourly = useResource(`/dashboard?days=${days}&granularity=hour`, normalize);
@@ -166,6 +272,21 @@ export function Dashboard() {
         }
       />
       <ResourceState {...resource} />
+      {d?.config_notice && !noticeHidden && (
+        <ConfigNotice notice={d.config_notice} onDismiss={() => setConfirmingNotice(true)} />
+      )}
+      <DrawerPresence>
+        {confirmingNotice && d?.config_notice && (
+          <ConfigNoticeConfirm
+            notice={d.config_notice}
+            onClose={() => setConfirmingNotice(false)}
+            onDismissed={() => {
+              setNoticeHidden(true);
+              setConfirmingNotice(false);
+            }}
+          />
+        )}
+      </DrawerPresence>
       {d && (
         <>
           {(d.degraded === true || d.storage.degraded === true) && (

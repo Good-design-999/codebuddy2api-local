@@ -153,6 +153,20 @@ const zh: Record<string, string> = {
   "logs.action.credentials_exported": "凭证已导出",
   "logs.action.storage_archive": "日志归档",
   "dash.refresh": "刷新",
+  "dash.configNoticeTitle": "配置来源分散",
+  "dash.configNoticeBody":
+    "有 {count} 项运行参数来自 .env 或环境变量，在 WebUI 中只读：{keys}。停止服务后执行下面的命令把它们迁移到配置库，之后即可在 WebUI 修改。",
+  "dash.configNoticeCopy": "复制命令",
+  "dash.configNoticeCopied": "已复制",
+  "dash.configNoticeDismiss": "不再提醒",
+  "dash.configNoticeConfirmTitle": "关闭迁移提醒",
+  "dash.configNoticeConfirmStrong": "关闭后不再提示，即使之后又新增了运行参数",
+  "dash.configNoticeConfirmBody":
+    "当前 {count} 项仍由 .env 或环境变量提供，在 WebUI 中保持只读。要真正在 WebUI 修改，请停止服务后执行迁移命令；只关闭提醒不会改变这些配置。",
+  "dash.configNoticeCancel": "取消",
+  "dash.configNoticeConfirm": "确认关闭提醒",
+  "dash.configNoticeConfirming": "正在关闭…",
+  "dash.configNoticeFailed": "未能关闭提醒，请稍后重试",
   "dash.runtime": "运行概览",
   "dash.trend": "请求趋势",
   "dash.range": "统计时间范围",
@@ -430,6 +444,21 @@ const en: Record<string, string> = {
   "logs.action.credentials_exported": "Credentials exported",
   "logs.action.storage_archive": "Log archive",
   "dash.refresh": "Refresh",
+  "dash.configNoticeTitle": "Scattered configuration sources",
+  "dash.configNoticeBody":
+    "{count} runtime settings still come from .env or the environment and stay read-only in the WebUI: {keys}. Stop the service, run the command below to move them into the configuration store, then edit them here.",
+  "dash.configNoticeCopy": "Copy command",
+  "dash.configNoticeCopied": "Copied",
+  "dash.configNoticeDismiss": "Do not remind me",
+  "dash.configNoticeConfirmTitle": "Stop the migration reminder",
+  "dash.configNoticeConfirmStrong":
+    "The reminder never returns, even after new runtime keys appear",
+  "dash.configNoticeConfirmBody":
+    "{count} settings still come from .env or the environment and stay read-only here. To edit them, stop the service and run the migration command; dismissing this reminder changes no settings.",
+  "dash.configNoticeCancel": "Cancel",
+  "dash.configNoticeConfirm": "Stop the reminder",
+  "dash.configNoticeConfirming": "Stopping…",
+  "dash.configNoticeFailed": "Could not dismiss the notice; try again later",
   "dash.runtime": "Runtime overview",
   "dash.trend": "Request trend",
   "dash.range": "Statistics range",
@@ -579,6 +608,10 @@ function savedPref(): LangPref {
   }
 }
 let currentPref: LangPref = "system";
+export function serverPreference(value: unknown): LangPref {
+  if (value === "zh" || value === "en") return value;
+  return "system";
+}
 export function languagePreference(): LangPref {
   return currentPref;
 }

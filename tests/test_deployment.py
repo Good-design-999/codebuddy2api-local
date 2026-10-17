@@ -78,7 +78,9 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(values["CODEBUDDY2API_" + env_key], str(RUNTIME_DEFAULTS[config_key]))
         self.assertEqual(values["CODEBUDDY2API_KEY"], "")
         self.assertEqual(values["CODEBUDDY2API_BIND"], "127.0.0.1")
-        self.assertEqual(values["CODEBUDDY2API_IMAGE"], "codebuddy2api:local")
+        # The template leaves the image commented so Compose falls back to the published latest tag.
+        self.assertNotIn("CODEBUDDY2API_IMAGE", values)
+        self.assertEqual(values["CODEBUDDY2API_AUTH_PATH"], "./auth")
         self.assertNotIn("CODEBUDDY2API_AUTO_TRIAL", values)
         self.assertNotIn("CODEBUDDY2API_AUTO_TRIAL", (ROOT / "docker-compose.yml").read_text())
         self.assertEqual(values["CODEBUDDY2API_ADMIN_CSRF"], str(RUNTIME_DEFAULTS["admin_csrf"]).lower())
@@ -87,20 +89,22 @@ class DeploymentTests(unittest.TestCase):
         self.assertNotIn("CODEBUDDY2API_RESPONSES_PROJECTION_MODE", values)
         self.assertNotIn("CODEBUDDY2API_RESPONSES_PROJECTION_MAX_BYTES", values)
 
-    def test_tool_metadata_compose_environment_is_optional(self):
-        key = "CODEBUDDY2API_KEEP_TOOL_METADATA"
-        self.assertRegex((ROOT / "docker-compose.yml").read_text(), rf"(?m)^ +{key}: *$")
-        self.assertRegex((ROOT / ".env.example").read_text(), rf"(?m)^# {key}=(true|false)$")
-        origins = "CODEBUDDY2API_ADMIN_ORIGINS"
-        self.assertRegex((ROOT / "docker-compose.yml").read_text(), rf"(?m)^ +{origins}: *$")
-        self.assertRegex((ROOT / ".env.example").read_text(), rf"(?m)^# {origins}=https://")
+    def test_tool_metadata_and_origins_stay_optional_through_dotenv(self):
+        compose = (ROOT / "docker-compose.yml").read_text()
+        example = (ROOT / ".env.example").read_text()
+        self.assertIn("env_file:", compose)
+        for key in ("CODEBUDDY2API_KEEP_TOOL_METADATA", "CODEBUDDY2API_ADMIN_ORIGINS"):
+            with self.subTest(key=key):
+                # .env decides these; leaving them out keeps the WebUI authoritative.
+                self.assertNotIn(key + ":", compose)
+                self.assertRegex(example, rf"(?m)^# {key}=")
 
-    def test_responses_projection_compose_environment_is_optional(self):
+    def test_responses_projection_stays_optional_through_dotenv(self):
         compose = (ROOT / "docker-compose.yml").read_text()
         example = (ROOT / ".env.example").read_text()
         for key in ("CODEBUDDY2API_RESPONSES_PROJECTION_MODE",
                     "CODEBUDDY2API_RESPONSES_PROJECTION_MAX_BYTES"):
-            self.assertRegex(compose, rf"(?m)^ +{key}: *$")
+            self.assertNotIn(key + ":", compose)
             self.assertRegex(example, rf"(?m)^# {key}=")
 
     def test_docker_copies_and_allows_all_local_runtime_imports(self):
@@ -177,14 +181,23 @@ class DeploymentTests(unittest.TestCase):
                                     capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_compose_has_old_syntax_fallbacks_without_required_env_file(self):
+    def test_compose_loads_dotenv_and_defaults_to_the_latest_image(self):
         text = (ROOT / "docker-compose.yml").read_text()
         self.assertIn('version: "3.8"', text)
-        self.assertNotIn("env_file:", text)
-        self.assertNotIn("required:", text)
-        for name, fallback in (("MAX_IMAGES", "16"), ("IMAGE_POLICY", "truncate"),
-                               ("MAX_REQUEST_BYTES", "33554432"), ("LOG_BODY_LIMIT", "65536"), ("ADMIN_CSRF", "true")):
-            self.assertIn("${CODEBUDDY2API_" + name + ":-" + fallback + "}", text)
+        # The whole .env reaches the container and a missing file stays valid.
+        self.assertIn("env_file:", text)
+        self.assertIn("required: false", text)
+        self.assertIn("ghcr.io/maiphucgiang/codebuddy2api:latest", text)
+        # Optional knobs come from .env instead of per-variable fallbacks in the service.
+        for name in ("MAX_IMAGES", "IMAGE_POLICY", "MAX_REQUEST_BYTES", "LOG_BODY_LIMIT", "ADMIN_CSRF"):
+            self.assertNotIn("${CODEBUDDY2API_" + name, text)
+        self.assertEqual(re.findall(r"(?m)^ +([A-Z][A-Z0-9_]*):", text),
+                         ["CODEBUDDY_AUTH_DIR", "CODEBUDDY2API_ALLOW_OPEN_NOAUTH"])
+        # The image CMD owns the listener flags, so Compose does not restate the command.
+        self.assertNotIn("command:", text)
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        self.assertIn('CMD ["python3", "converter.py", "--host", "0.0.0.0", "--port", "8787", '
+                      '"--skip-check", "--desensitize"]', dockerfile)
         for filename in ("README.md", "README.zh-CN.md"):
             doc = (ROOT / filename).read_text()
             self.assertIn("cp .env.example .env", doc)

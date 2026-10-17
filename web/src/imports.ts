@@ -101,3 +101,33 @@ export async function prepareImports(
   if (!count) throw new Error("ZIP 中没有可导入文件");
   return { files: accepted, results };
 }
+
+// The endpoint is always explicit: a domestic refresh token cannot tell CLI from WorkBuddy.
+export const REFRESH_PROFILES = [
+  { value: "cn-work", label: "国内 WorkBuddy" },
+  { value: "cn-cli", label: "国内 CodeBuddy CLI" },
+  { value: "intl-work", label: "国际 WorkBuddy" },
+  { value: "intl-cli", label: "国际 CodeBuddy CLI" },
+] as const;
+export const MAX_REFRESH_TOKENS = 50;
+export const MAX_REFRESH_TOKEN_LENGTH = 8192;
+export type RefreshProfile = (typeof REFRESH_PROFILES)[number]["value"];
+
+/** Split textarea input into unique tokens, skipping blanks, comments and oversized lines. */
+export function parseRefreshTokens(input: string): { tokens: string[]; rejected: number } {
+  const seen = new Set<string>();
+  const tokens: string[] = [];
+  let rejected = 0;
+  for (const raw of input.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line.length > MAX_REFRESH_TOKEN_LENGTH) {
+      rejected++;
+      continue;
+    }
+    if (seen.has(line)) continue;
+    seen.add(line);
+    tokens.push(line);
+  }
+  return { tokens, rejected };
+}

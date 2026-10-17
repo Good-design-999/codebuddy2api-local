@@ -31,7 +31,14 @@ import {
   ResourceState,
   profileLabel,
 } from "../components";
-import { prepareImports, type ImportResult } from "../imports";
+import {
+  MAX_REFRESH_TOKENS,
+  REFRESH_PROFILES,
+  parseRefreshTokens,
+  prepareImports,
+  type ImportResult,
+  type RefreshProfile,
+} from "../imports";
 import { downloadFilename } from "../downloads";
 import s from "../ui.module.scss";
 
@@ -61,55 +68,160 @@ function boundModels(credential: Credential): string[] {
 }
 
 function ImportDrawer({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const [tab, setTab] = useState<"file" | "token">("file");
   const [results, setResults] = useState<ImportResult[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [profile, setProfile] = useState<RefreshProfile>("cn-work");
+  const [input, setInput] = useState("");
+  const parsed = parseRefreshTokens(input);
+  const tooMany = parsed.tokens.length > MAX_REFRESH_TOKENS;
+  const switchTab = (next: "file" | "token") => {
+    if (busy) return;
+    setTab(next);
+    setResults([]);
+    setError(null);
+  };
+  const importFiles = (files: File[]) => {
+    setBusy(true);
+    setError(null);
+    setResults([]);
+    void prepareImports(files)
+      .then(async (batch) => {
+        setResults(batch.results);
+        if (!batch.files.length) return;
+        const response = await api.post<unknown>("/credentials/upload", {
+          files: batch.files,
+          replace: false,
+        });
+        const server = list(object(response.data).results).map((item) => {
+          if (typeof item.name !== "string" || typeof item.ok !== "boolean")
+            throw new Error("导入结果缺少 name / ok");
+          return {
+            name: item.name,
+            ok: item.ok,
+            ...(item.error ? { error: text(item.error) } : {}),
+          };
+        });
+        setResults([...batch.results, ...server]);
+        if (server.some((item) => item.ok)) onDone();
+      })
+      .catch((err: unknown) => setError(errorMessage(err)))
+      .finally(() => setBusy(false));
+  };
+  const importTokens = () => {
+    if (busy || !parsed.tokens.length || tooMany) return;
+    setBusy(true);
+    setError(null);
+    setResults([]);
+    void api
+      .post<unknown>("/credentials/refresh-import", {
+        profile,
+        refresh_tokens: parsed.tokens,
+      })
+      .then((response) => {
+        const server = list(object(response.data).results).map((item) => {
+          if (typeof item.name !== "string" || typeof item.ok !== "boolean")
+            throw new Error("导入结果缺少 name / ok");
+          return {
+            name: item.name,
+            ok: item.ok,
+            ...(item.error ? { error: text(item.error) } : {}),
+          };
+        });
+        setResults(server);
+        if (server.some((item) => item.ok)) onDone();
+      })
+      .catch((err: unknown) => setError(errorMessage(err)))
+      .finally(() => setBusy(false));
+  };
   return (
     <Drawer title="导入凭证" onClose={onClose} dismissDisabled={busy}>
-      <p className={s.note}>
-        支持 UTF-8 .info 或 ZIP，ZIP 仅接受根目录 .info。单项 ≤ 1 MiB，每批 ≤ 100 项 / 32
-        MiB，不覆盖现有文件。
-      </p>
-      <label className={s.upload}>
-        选择 .info 或 ZIP
-        <input
-          type="file"
-          accept=".info,.zip"
-          multiple
-          disabled={busy}
-          onChange={(e) => {
-            const files = Array.from(e.target.files ?? []);
-            e.target.value = "";
-            if (!files.length) return;
-            setBusy(true);
-            setError(null);
-            setResults([]);
-            void prepareImports(files)
-              .then(async (batch) => {
-                setResults(batch.results);
-                if (!batch.files.length) return;
-                const response = await api.post<unknown>("/credentials/upload", {
-                  files: batch.files,
-                  replace: false,
-                });
-                const server = list(object(response.data).results).map((item) => {
-                  if (typeof item.name !== "string" || typeof item.ok !== "boolean")
-                    throw new Error("导入结果缺少 name / ok");
-                  return {
-                    name: item.name,
-                    ok: item.ok,
-                    ...(item.error ? { error: text(item.error) } : {}),
-                  };
-                });
-                setResults([...batch.results, ...server]);
-                if (server.some((item) => item.ok)) onDone();
-              })
-              .catch((err: unknown) => setError(errorMessage(err)))
-              .finally(() => setBusy(false));
-          }}
-        />
-      </label>
-      {busy && <p role="status">正在检查并上传，请勿关闭…</p>}
+      <div className={s.tabs} role="tablist" aria-label="导入方式">
+        {(
+          [
+            ["file", "文件导入"],
+            ["token", "仅刷新令牌"],
+          ] as ["file" | "token", string][]
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            role="tab"
+            aria-selected={tab === key}
+            className={tab === key ? s.selectedTab : ""}
+            onClick={() => switchTab(key)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {tab === "file" ? (
+        <>
+          <p className={s.note}>
+            支持 UTF-8 .info 或 ZIP，ZIP 仅接受根目录 .info。单项 ≤ 1 MiB，每批 ≤ 100 项 / 32
+            MiB，不覆盖现有文件。
+          </p>
+          <label className={s.upload}>
+            选择 .info 或 ZIP
+            <input
+              type="file"
+              accept=".info,.zip"
+              multiple
+              disabled={busy}
+              onChange={(e) => {
+                const files = Array.from(e.target.files ?? []);
+                e.target.value = "";
+                if (files.length) importFiles(files);
+              }}
+            />
+          </label>
+          {busy && <p role="status">正在检查并上传，请勿关闭…</p>}
+        </>
+      ) : (
+        <>
+          <p className={s.note}>
+            每行一个刷新令牌，逐条换取访问令牌后写入新凭证。端点决定产品与地区：国内刷新令牌分不出
+            CLI 与 WorkBuddy，跨区令牌会被上游直接拒绝。
+          </p>
+          <label className={s.field}>
+            端点
+            <select
+              value={profile}
+              disabled={busy}
+              onChange={(e) => setProfile(e.target.value as RefreshProfile)}
+            >
+              {REFRESH_PROFILES.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}（{item.value}）
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className={s.field}>
+            刷新令牌
+            <textarea
+              value={input}
+              rows={8}
+              spellCheck={false}
+              disabled={busy}
+              placeholder={"每行一个刷新令牌，# 开头的行会被忽略"}
+              onChange={(e) => setInput(e.target.value)}
+            />
+          </label>
+          <p className={s.note}>
+            已识别 {parsed.tokens.length} / {MAX_REFRESH_TOKENS} 条
+            {parsed.rejected ? `，${parsed.rejected} 行超过 8192 字符已忽略` : ""}。
+          </p>
+          <button
+            type="button"
+            disabled={busy || !parsed.tokens.length || tooMany}
+            onClick={importTokens}
+          >
+            {busy ? "正在逐条刷新并写入，请勿关闭…" : `刷新并导入 ${parsed.tokens.length} 条`}
+          </button>
+        </>
+      )}
       <ErrorNotice message={error} />
       {results.map((r, i) => (
         <div className={s.importResult} key={i}>

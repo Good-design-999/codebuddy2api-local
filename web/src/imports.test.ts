@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 import { zipSync, strToU8 } from "fflate";
-import { prepareImports, validName, MAX_FILE } from "./imports";
+import {
+  MAX_FILE,
+  MAX_REFRESH_TOKEN_LENGTH,
+  parseRefreshTokens,
+  prepareImports,
+  validName,
+} from "./imports";
 function file(name: string, bytes: Uint8Array): File {
   return {
     name,
@@ -40,5 +46,18 @@ describe("bounded credential import", () => {
     ]);
     expect(result.files).toHaveLength(1);
     expect(result.results).toHaveLength(2);
+  });
+});
+
+describe("refresh token batch input", () => {
+  it("splits lines, ignores comments and blanks, and dedupes tokens", () => {
+    const result = parseRefreshTokens(" rt-a \n# note\n\nrt-b\nrt-a\n");
+    expect(result.tokens).toEqual(["rt-a", "rt-b"]);
+    expect(result.rejected).toBe(0);
+  });
+  it("skips oversized lines without dropping the remaining ones", () => {
+    const result = parseRefreshTokens(`ok\n${"x".repeat(MAX_REFRESH_TOKEN_LENGTH + 1)}\nnext`);
+    expect(result.tokens).toEqual(["ok", "next"]);
+    expect(result.rejected).toBe(1);
   });
 });

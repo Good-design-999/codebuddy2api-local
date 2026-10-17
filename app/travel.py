@@ -20,12 +20,42 @@ class _Failure(ValueError):
             self.diagnostics["reason"] = reason
 
 
-def supported(profile):
-    return profile in {"cn-cli", "cn-work"}
+PERSONAL_PROFILES = frozenset({"cn-cli", "cn-work"})
 
 
-def unavailable():
-    return {"ok": False, "skipped": True, "state": "unavailable", "message": "旅行仅适用于国内账号"}
+def supported(profile, enterprise=False):
+    """Whether the growth-center travel program can serve this account.
+
+    The upstream growth center is personal-only: an enterprise tenant is refused
+    with ``growth system is only available for personal users`` (HTTP 403 /
+    business code 403) on every buddy and travel path, so the region/product
+    profile alone is not sufficient and the tenant type must be honoured first.
+    """
+    return profile in PERSONAL_PROFILES and not enterprise
+
+
+def unavailable(profile=None, enterprise=False):
+    """Explain the exemption, naming the most specific cause for the operator."""
+    if enterprise and (profile is None or profile in PERSONAL_PROFILES):
+        message = "企业账号不参与成长中心，无法旅行"
+    elif profile is None or profile in PERSONAL_PROFILES:
+        message = "当前账号不参与成长中心，无法旅行"
+    else:
+        message = "旅行仅适用于国内账号"
+    return {"ok": False, "skipped": True, "state": "unavailable", "message": message}
+
+
+def clear_unsupported(ledger, cid, notice):
+    """Persist the terminal exemption once so a stale refusal cannot outlive the gate.
+
+    Returns whether the stored record changed, which keeps the periodic sweep from
+    rewriting the ledger on every pass for accounts that can never travel.
+    """
+    previous = ledger.entry(cid).get("travel") or {}
+    if previous.get("state") == "unavailable" and previous.get("message") == notice["message"]:
+        return False
+    ledger.update_travel(cid, {**notice, "at": time.time()})
+    return True
 
 
 def _number(value):
@@ -59,6 +89,9 @@ def _request(client, token, operation, *, body=None):
     reason = next((value for text, value in {
         "no active buddy": "no_active_buddy", "daily limit": "daily_limit",
         "already traveling": "already_traveling", "location not available": "location_unavailable",
+        # A tenant that reaches the growth center anyway is exempt, not broken: label it
+        # so the operator sees a capability boundary instead of a bare HTTP failure.
+        "only available for personal users": "personal_only",
     }.items() if isinstance(message, str) and len(message) <= 512 and text in message.lower()), None)
     if status != 200:
         raise _Failure("http", status, code, reason)
@@ -105,9 +138,10 @@ def _status(data):
             "server_now": server_now, "remaining_seconds": remaining}
 
 
-def perform(token, profile, *, read_only=False, can_write=lambda: True, buddy_context=None):
-    if not supported(profile):
-        return unavailable()
+def perform(token, profile, *, read_only=False, can_write=lambda: True, buddy_context=None,
+            enterprise=False):
+    if not supported(profile, enterprise):
+        return unavailable(profile, enterprise)
     result = {"ok": False, "state": "unknown", "claimed": False, "departed": False, "stale": False, "phase": "status"}
     phase = "status"
     context = buddy_context or {}
@@ -282,7 +316,12 @@ def perform(token, profile, *, read_only=False, can_write=lambda: True, buddy_co
                    "daily_limit": "官方拒绝派遣：今日派遣已达上限",
                    "already_traveling": "官方拒绝派遣：猫猫已在旅行，请查询最新状态",
                    "location_unavailable": "官方拒绝派遣：该地点暂时不可用"}.get(result.get("reason"))
-        if phase == "depart" and refusal:
+        if result.get("reason") == "personal_only":
+            # A capability boundary, not a transient failure: say so in every phase so the
+            # operator does not read a permanent exemption as a retryable outage.
+            result["message"] = ("旅行积分已领取；" if result["claimed"] else "") + \
+                "该账号不参与成长中心（仅个人账号可用），已停止旅行操作"
+        elif phase == "depart" and refusal:
             result["message"] = ("旅行积分已领取；" if result["claimed"] else "") + refusal
         if diagnostics["error_kind"] == "storage":
             receipt = ("领取已确认，但" if write_operation == "claim" else "派遣已确认，但") if confirmed else ""

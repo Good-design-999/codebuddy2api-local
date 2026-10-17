@@ -94,9 +94,14 @@ class RegionRoutingTests(unittest.TestCase):
         self.configure()
         self.client = self.enterContext(TestClient(converter.app))
 
-    def add_account(self, uid, profile):
+    def add_account(self, uid, profile, enterprise=""):
         now = time.time()
-        value = {"account": {"uid": uid, "enterpriseId": "synthetic-enterprise"},
+        # Real accounts are personal unless they carry a tenant, and the growth center
+        # refuses a tenant outright, so the default fixture must stay personal.
+        account = {"uid": uid}
+        if enterprise:
+            account["enterpriseId"] = enterprise
+        value = {"account": account,
                  "auth": {"domain": DOMAINS[profile], "accessToken": "synthetic-access-" + uid,
                           "refreshToken": "synthetic-refresh-" + uid,
                           "expiresAt": (now + 86400) * 1000, "lastRefreshTime": now * 1000}}

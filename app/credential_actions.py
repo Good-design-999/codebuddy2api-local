@@ -144,8 +144,12 @@ def _one(gateway, pool, ledger, entry, action, *, automatic=False, consent_revis
     cm, cid = entry["cm"], entry["id"]
     if not model_policy.credential_enabled(gateway.CONFIG, entry):
         return {"ok": False, "skipped": True, "message": "账号已人工停用"}
-    if action in {"travel", "travel-status"} and not travel.supported(entry.get("profile")):
-        return travel.unavailable()
+    if action in {"travel", "travel-status"} and not travel.supported(entry.get("profile"), entry.get("enterprise") is True):
+        # Record the terminal exemption so a previous HTTP refusal stops being shown as
+        # the account's current travel state.
+        notice = travel.unavailable(entry.get("profile"), entry.get("enterprise") is True)
+        travel.clear_unsupported(ledger, entry["id"], notice)
+        return notice
     with cm._lock:
         if cm.summary().get("account_key") != entry.get("account_key"):
             return {"ok": False, "state": "changed", "message": "凭证身份已变化，请刷新列表"}
@@ -168,6 +172,7 @@ def _one(gateway, pool, ledger, entry, action, *, automatic=False, consent_revis
                     and pool.apply_if_current(cm, generation, lambda: None))
         result = travel.perform(gateway._bearer_token(headers), gateway.profile_for_headers(headers),
                                 read_only=action == "travel-status", can_write=can_write,
+                                enterprise=entry.get("enterprise") is True,
                                 buddy_context=gateway._buddy_context(entry, headers, consent_revision))
         if not pool.apply_if_current(cm, generation, lambda: travel.remember(ledger, cid, result)):
             return {**result, "ok": False, "stale": True, "message": "凭证已变化，旅行结果未写入，请刷新核验"}

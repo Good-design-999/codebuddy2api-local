@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vite-plus/test";
 import { Credentials } from "./pages/Credentials";
-import { api, credentialResponse, useResource } from "./api";
+import { api, credentialResponse, useResource, type Credential } from "./api";
 import { TravelSummary } from "./Travel";
 
 function openRowMenu(credentialName: string) {
@@ -19,7 +19,7 @@ vi.mock("./api", async (original) => ({
 }));
 beforeEach(() => vi.restoreAllMocks());
 function fixture() {
-  const rows = [
+  const rows: Credential[] = [
     {
       id: "cn",
       name: "cn.info",
@@ -107,6 +107,34 @@ it("renders server preferences, allows international checkin opt-in, but never o
   expect(patch).toHaveBeenLastCalledWith("/credentials/cn", { auto_travel: false });
   expect(screen.getByRole("switch", { name: "自动签到 cn.info" })).toHaveProperty("checked", true);
   expect(post).not.toHaveBeenCalled();
+});
+
+it("explains an enterprise account's travel exemption instead of blaming the region", async () => {
+  const { rows } = fixture();
+  // The growth center is personal-only, so the enterprise card must state the real reason.
+  rows.push({
+    id: "ent",
+    name: "ent.info",
+    profile: "cn-cli",
+    enabled: true,
+    health: "ready",
+    enterprise: true,
+    enterpriseName: "示例企业",
+    auto_checkin: true,
+    auto_travel: false,
+    travel_supported: false,
+    travel: { state: "unavailable", message: "企业账号不参与成长中心，无法旅行" },
+  });
+  render(<Credentials />);
+  fireEvent.click(screen.getByRole("button", { name: "任务配置 ent.info" }));
+  expect(screen.getByRole("switch", { name: "自动旅行 ent.info" })).toHaveProperty(
+    "disabled",
+    true,
+  );
+  expect(screen.getByText("企业账号不参与成长中心，无法旅行")).toBeTruthy();
+  // The manual travel actions are hidden, so no request can be sent for this account.
+  expect(screen.queryByRole("button", { name: "旅行领派 ent.info" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "旅行状态 ent.info" })).toBeNull();
 });
 
 it("does not pretend a failed or malformed save succeeded", async () => {
@@ -205,7 +233,7 @@ it("disables switches when an older backend omits them and rejects malformed typ
 
 it("shows server-provided travel locations and snapshot durations without triggering requests", () => {
   const { rows } = fixture();
-  Object.assign(rows[0].travel, {
+  Object.assign(rows[0].travel as Record<string, unknown>, {
     location_name: "海边书店",
     remaining_seconds: 3661,
     phase: "after_depart",

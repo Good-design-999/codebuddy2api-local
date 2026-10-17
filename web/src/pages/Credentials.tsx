@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { OAuth } from "../OAuth";
 import { Trial } from "../Trial";
 import { TravelSummary } from "../Travel";
@@ -215,22 +216,53 @@ function MoreMenu({
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
   const ref = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  // The menu is portaled to <body>: panels use backdrop-filter, which would make a
+  // locally fixed menu resolve against the panel and drift outside the viewport.
+  const place = useCallback(() => {
+    const trigger = ref.current?.querySelector<HTMLElement>("button");
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const menu = menuRef.current;
+    const width = menu?.offsetWidth || 160;
+    const height = menu?.offsetHeight || 220;
+    const margin = 8;
+    const left = Math.min(Math.max(margin, rect.right - width), window.innerWidth - width - margin);
+    let top = rect.bottom + 4;
+    if (top + height > window.innerHeight - margin) top = Math.max(margin, rect.top - height - 4);
+    setPosition({ top, left });
+  }, []);
+
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      const target = e.target as Node;
+      if (!ref.current?.contains(target) && !menuRef.current?.contains(target)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
     };
+    const onMove = () => place();
     document.addEventListener("mousedown", onDoc);
     document.addEventListener("keydown", onKey);
+    window.addEventListener("resize", onMove);
+    window.addEventListener("scroll", onMove, true);
     return () => {
       document.removeEventListener("mousedown", onDoc);
       document.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", onMove);
+      window.removeEventListener("scroll", onMove, true);
     };
-  }, [open]);
+  }, [open, place]);
+
+  useLayoutEffect(() => {
+    setPosition(null);
+    if (open) place();
+  }, [open, place]);
+
   return (
     <div className={s.moreMenu} ref={ref}>
       <button
@@ -241,11 +273,19 @@ function MoreMenu({
       >
         {title}
       </button>
-      {open && (
-        <div className={s.moreMenuList} role="menu" onClick={() => setOpen(false)}>
-          {children}
-        </div>
-      )}
+      {open &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className={s.moreMenuList}
+            role="menu"
+            style={position ? { top: position.top, left: position.left } : { visibility: "hidden" }}
+            onClick={() => setOpen(false)}
+          >
+            {children}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

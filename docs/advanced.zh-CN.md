@@ -8,7 +8,11 @@
 
 配置优先级：**显式 CLI 参数 > 进程环境变量 > `.env` > SQLite 保存值 > 默认值**。热更新设置立即生效，标记为重启的项需手动重启；锁定项请在对应来源修改，WebUI 不改写 `.env` 或返回 API key 明文。
 
-Compose 会显式传入部分环境变量及 CLI 参数，删除 `.env` 中的一行不一定解除锁定。修改这些值后重建容器；若要由 WebUI 接管，还需取消 Compose 中对应的显式设置。
+Compose 会加载 `.env` 中的每个键，注释掉一行即可解除锁定；只有 `CODEBUDDY_AUTH_DIR` 和 `CODEBUDDY2API_ALLOW_OPEN_NOAUTH` 由 Compose 文件固定。修改这些值后重建容器。
+
+`.env` 里的运行参数在 WebUI 中始终只读，直到被搬进配置库：停止服务后执行 `python3 converter.py config migrate`（见[配置迁移](deployment.zh-CN.md#配置迁移)）。Dashboard 会显示一次性横幅列出这些键；迁移或点击“不再提醒”都会在配置库写入 `config_notice_muted` 并停止提示，之后新增的 `.env` 运行参数也不再提醒。
+
+`language`（`auto|zh|en`）是 WebUI 与 CLI 共用的唯一界面偏好：没有环境变量映射，也永不被锁定。`--lang` 会在 `serve`、`login`、`config migrate` 时写入该值；`config status` 只读，仅影响本次输出。
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
@@ -45,11 +49,11 @@ Compose 会显式传入部分环境变量及 CLI 参数，删除 `.env` 中的�
 | `--max-request-bytes` | `33554432` | 处理后的上游 JSON 字节上限，不含网关内部元数据，须为正整数 |
 | `--log-body-limit` | `65536` | 旧文本预览兼容项；文本输出已停用，SQLite 诊断使用独立预算 |
 
-环境变量包括 `CODEBUDDY_AUTH_DIR`、`CODEBUDDY_IMPORT_DIR`、`CODEBUDDY2API_KEY`、`CODEBUDDY2API_ADMIN_CSRF`、`CODEBUDDY2API_ADMIN_ORIGINS`、`CODEBUDDY2API_KEEP_TOOL_METADATA`、`CODEBUDDY2API_STREAM_MODE`、`CODEBUDDY2API_LOG`、`CODEBUDDY2API_RESPONSES_PROJECTION_MODE`、`CODEBUDDY2API_RESPONSES_PROJECTION_MAX_BYTES`、`CODEBUDDY2API_MAX_IMAGES`、`CODEBUDDY2API_IMAGE_POLICY`、`CODEBUDDY2API_MAX_REQUEST_BYTES`、`CODEBUDDY2API_LOG_BODY_LIMIT`、`CODEBUDDY2API_FAILOVER_MAX`、`CODEBUDDY2API_RETRY_WRITE_TIMEOUT`。启动示例见[部署指南](deployment.zh-CN.md)。
+全部生效的环境变量及默认值见 `.env.example`；启动示例见[部署指南](deployment.zh-CN.md)。
 
 ### Responses 投影
 
-通过 WebUI、CLI、环境变量或 `.env` 配置这两项热更新设置。优先级为 CLI > 进程环境变量 > `.env` > SQLite 保存值 > 默认值；CLI/环境变量会锁定 WebUI 字段。Compose 仅转发宿主环境已设置的变量，两项均未设置时 WebUI 仍可编辑。
+通过 WebUI、CLI、环境变量或 `.env` 配置这两项热更新设置。优先级为 CLI > 进程环境变量 > `.env` > SQLite 保存值 > 默认值；CLI/环境变量会锁定 WebUI 字段。Compose 整体加载 `.env`，注释掉对应行即保持 WebUI 可编辑。
 
 `responses_projection_mode` 默认为 `balanced`，仅接受 `balanced` 和 `passthrough`。balanced 仅改写有固定摘要的已识别 harness；这些块之外的文本不计入预算、不会被裁剪。它还会按 `responses_projection_max_bytes` 对 assistant 内容、完整工具参数 JSON 和工具结果采用 Codex 风格头尾截断；文本标记显示原始 bytes、估算 tokens 与总行数。超限工具参数仍是有效 JSON，并以有界对象保留原始头尾和大小元数据。passthrough 完全关闭 Responses 投影。
 
@@ -63,16 +67,16 @@ Responses 投影不再修改工具定义或 schema。启用脱敏时，默认剥
 
 - **WebUI**：系统设置 → 保留工具描述，未被启动来源锁定时可立即生效并持久化。
 - **CLI**：在原启动命令追加 `--keep-tool-metadata` 或 `--keep-tool-metadata true`；显式 `false` 可覆盖环境变量。
-- **环境变量**：设置 `CODEBUDDY2API_KEEP_TOOL_METADATA=true`；Compose 会传入已设置的值，未设置时不锁定 WebUI。删除或注释变量可解除环境锁定，不要设为空串。
+- **环境变量**：在 `.env` 中设置 `CODEBUDDY2API_KEEP_TOOL_METADATA=true`；注释掉该行即解除锁定，不要设为空串。
 
-需使用包含此功能的源码/镜像和 Compose 配置；修改容器环境后重新创建容器。保留描述可能增加输入 token 和审核拦截风险；设为 `false` 恢复脱敏默认剥离行为。此开关不改变 Responses 的 balanced/passthrough 模式，也不放宽请求体预算。
+需使用包含此功能的源码或镜像；修改容器环境后重新创建容器。保留描述可能增加输入 token 和审核拦截风险；设为 `false` 恢复脱敏默认剥离行为。此开关不改变 Responses 的 balanced/passthrough 模式，也不放宽请求体预算。
 
 ### 流式模式
 
 `stream_mode` 默认 `compatible`，可通过 `--stream-mode compatible|realtime`、`CODEBUDDY2API_STREAM_MODE` 或 WebUI 枚举配置；显式 CLI/环境来源会锁定该项。所有生成请求（含非流式）均在选路前冻结模式及 `max_collect_bytes`，并记录所选模式。热更新只影响后续请求，不改变在途请求及换号；非流式仍返回聚合 JSON，客户端不能按请求覆盖模式。
 
 - `compatible` 保持现有行为：Responses 流式先聚合；Chat/Messages 带工具时先聚合，无工具时沿用上游增量。聚合结果先校验，再按片段重放。两种模式下，非流式请求始终走已校验的聚合路径。
-- `realtime` 让三个协议都增量发送正文、拒绝及工具参数，并在正文开始前合并思考增量为一个事件，避免客户端显示多个思考段。Responses 在输出项开始时分配稳定索引，Anthropic 使用稳定 block index。适配器在参数阶段或结束标记处确认工具身份，缺失时暂缓工具输出；元数据分片按顺序追加，不按字符串前缀猜测，输出项开始后禁止更换身份。`max_collect_bytes` 约束所保留的 UTF-8 输出，`0` 不限制。
+- `realtime` 让三个协议都实时增量发送正文、拒绝、工具参数与思考，客户端能看到真实的思考时间轴；Responses 与 Anthropic 仍只产生一个逻辑思考项/块并使用稳定索引。`compatible` 保留旧行为：在正文开始前把思考合并成一个事件，会隐藏思考时间轴，并可能让客户端 TPS/首字指标虚高。适配器在参数阶段或结束标记处确认工具身份，缺失时暂缓工具输出；元数据分片按顺序追加，不按字符串前缀猜测，输出项开始后禁止更换身份。`max_collect_bytes` 约束所保留的 UTF-8 输出，`0` 不限制。
 
 实时 Messages 同时只打开一个内容块：当前工具仍增量输出，后续工具、正文或思考块可能等待上游结束，暂存事件字节计入 `max_collect_bytes`。尚未确认身份、未开始内容块的工具不会阻塞其它正文。
 
@@ -119,7 +123,7 @@ PY
 
 ### 连接复用与账号容量
 
-WebUI 系统设置可配置这两项；环境变量为 `CODEBUDDY2API_UPSTREAM_KEEPALIVE` 和 `CODEBUDDY2API_MAX_INFLIGHT_PER_ACCOUNT`，未设置时 Compose 不锁定 WebUI。连接复用默认关闭，启用后每个官方入口最多 64 条连接、保留 16 条空闲连接，空闲复用期限 30 秒；认证头逐请求设置，不保存上游 Cookie，关闭服务时释放连接池。原有代理环境、超时和重放规则不变；关闭并重启恢复逐请求连接。
+WebUI 系统设置可配置这两项；环境变量为 `CODEBUDDY2API_UPSTREAM_KEEPALIVE` 和 `CODEBUDDY2API_MAX_INFLIGHT_PER_ACCOUNT`，在 `.env` 中注释掉对应行时保持 WebUI 可编辑。连接复用默认关闭，启用后每个官方入口最多 64 条连接、保留 16 条空闲连接，空闲复用期限 30 秒；认证头逐请求设置，不保存上游 Cookie，关闭服务时释放连接池。原有代理环境、超时和重放规则不变；关闭并重启恢复逐请求连接。
 
 账号上限默认 `0`；设为正数后，仅在原路由及免费优先范围内避开满载账号，不因免费账号满载而转向收费账号。没有名额时返回 `503 / credential_concurrency_limit` 和 `Retry-After: 3`，不排队、不熔断；结束、断连和失败换号均释放名额。管理凭据 API 提供 `in_flight`、`max_in_flight`；限制只涵盖三个客户端生成接口，每进程独立，多个实例不共享计数。设回 `0` 即恢复原容量策略，不中断已开始的请求。
 
@@ -193,7 +197,7 @@ scoped 模式可选传入 `X-Codebuddy-Session-ID`、`metadata.conversation_id` 
 CODEBUDDY2API_ADMIN_CSRF=false
 ```
 
-仅启动时生效，CLI 优先于环境变量，不能通过 WebUI 修改。使用包含该开关的源码或镜像，并更新 Compose 配置；修改环境后须重新创建容器，不能仅执行 `docker compose restart`。旧镜像不会因新增变量自动获得此功能。
+仅启动时生效，CLI 优先于环境变量，不能通过 WebUI 修改。在 `.env` 中写入取值或传入对应参数后重新创建容器，不能仅执行 `docker compose restart`。
 
 关闭会跳过登录请求的 Origin 检查，以及 Cookie 管理写操作和 OAuth 轮询的 Origin/CSRF 检查；API key、会话有效期、OAuth 任务归属、官方授权地址白名单和危险操作确认仍保留，不影响 `/v1/*`。
 

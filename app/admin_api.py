@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import OrderedDict
 import io
 import json
+import os
 from pathlib import Path
 import threading
 import time
@@ -120,6 +121,20 @@ def install_admin(app, config, gateway):
                       "mode": "startup", "type": "boolean", "label": "全部国内账号首次领猫预授权", "locked": True})
         return {"revision": control.snapshot()["revision"], "items": items, "audit": audit.storage(),
                 "session": auth.storage()}
+
+    def config_notice():
+        """List runtime settings still supplied by the environment, until the user migrates or mutes."""
+        if config.get("config_notice_muted"):
+            return None
+        items = [{"key": key, "label": spec["label"]}
+                 for key, spec in SCHEMA.items()
+                 if spec.get("env") and spec.get("env_scope") == "runtime"
+                 and not spec.get("hidden") and not spec.get("sensitive")
+                 and spec["env"] in os.environ]
+        if not items:
+            return None
+        return {"count": len(items), "items": items,
+                "command": "python3 converter.py config migrate"}
 
     def audit_settings(values):
         mapping = {"audit_max_bytes": "max_bytes", "audit_retention_days": "retention_days",
@@ -285,6 +300,22 @@ def install_admin(app, config, gateway):
             for key in values:
                 event("settings.updated", {"code": key})
             return JSONResponse(settings_result())
+        return await run_in_threadpool(apply)
+
+    @route("POST", "/admin/config-notice/dismiss")
+    async def config_notice_dismiss(request):
+        body = await _body(request)
+
+        def apply():
+            with mutation_lock:
+                revision = body.get("revision")
+                if not isinstance(revision, int):
+                    revision = control.snapshot()["revision"]
+                control.update_settings({"config_notice_muted": True}, revision)
+                config["config_notice_muted"] = True
+                config.setdefault("settings_sources", {})["config_notice_muted"] = "management"
+            event("config.notice_dismissed")
+            return JSONResponse({"muted": True, "revision": revision + 1})
         return await run_in_threadpool(apply)
 
     @route("GET", "/admin/models")
@@ -649,6 +680,9 @@ def install_admin(app, config, gateway):
             result["official_credits"] = {row["id"]: {"credits": row.get("credits"), "name": row.get("name"),
                                                         "fetched_at": (row.get("credits") or {}).get("fetched_at")}
                                           for row in rows}
+            notice = config_notice()
+            if notice:
+                result["config_notice"] = notice
             return result
         result = await run_in_threadpool(build_dashboard)
         return result if isinstance(result, Response) else JSONResponse(result)

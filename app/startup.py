@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import io
 import os
+import signal
+import threading
 from pathlib import Path
 import stat
 
@@ -97,7 +99,32 @@ def announce_default_key(config):
     config["announce_default_key"] = False
 
 
+
+
+def _install_lease_release(config):
+    """Release the running-instance lease before uvicorn re-raises the stop signal.
+
+    uvicorn restores the original handlers and re-raises the captured signal, so a
+    `finally` around `Server.run` never executes on SIGTERM. Our handler is that
+    original, so it runs once more and then re-delivers the signal with defaults.
+    """
+    store = config.get("control_store")
+    if store is None or threading.current_thread() is not threading.main_thread():
+        return
+
+    def release(signum, _frame):
+        try:
+            store.release_service_lease()
+        finally:
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(signum, release)
+
+
 def run_server(app, config, *, host, port):
+    _install_lease_release(config)
     if not config.get("announce_default_key"):
         return uvicorn.run(app, host=host, port=port, log_level="warning")
 

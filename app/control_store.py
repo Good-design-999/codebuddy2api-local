@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 from datetime import date
+import os
 from pathlib import Path
 import sqlite3
 import threading
@@ -134,6 +135,9 @@ class ControlStore:
             self._db.execute("CREATE TABLE IF NOT EXISTS runtime_state (name TEXT PRIMARY KEY, payload TEXT NOT NULL)")
             self._db.execute("CREATE TABLE IF NOT EXISTS state_imports (name TEXT PRIMARY KEY, imported INTEGER NOT NULL, migrated_at REAL NOT NULL)")
             self._db.execute("CREATE TABLE IF NOT EXISTS gateway_secrets (name TEXT PRIMARY KEY, value TEXT NOT NULL, announced INTEGER NOT NULL DEFAULT 0 CHECK(announced IN (0,1)))")
+            # Running-instance lease; heartbeat writes bypass the settings revision on purpose.
+            self._db.execute("CREATE TABLE IF NOT EXISTS service_lease (id INTEGER PRIMARY KEY CHECK(id=1), "
+                             "pid INTEGER NOT NULL, started_at REAL NOT NULL, heartbeat_at REAL NOT NULL)")
             self._db.execute("PRAGMA user_version=2")
             self._db.execute("COMMIT")
         except Exception:
@@ -571,6 +575,32 @@ class ControlStore:
         with self._lock:
             self._db.execute("DELETE FROM daily_chats WHERE day<?", (cutoff,))
 
+
+    def claim_service_lease(self) -> None:
+        """Mark this process as the running instance so offline tools can refuse to write."""
+        now = time.time()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO service_lease (id, pid, started_at, heartbeat_at) VALUES (1, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET pid=excluded.pid, started_at=excluded.started_at, "
+                "heartbeat_at=excluded.heartbeat_at", (os.getpid(), now, now))
+
+    def heartbeat_service_lease(self) -> None:
+        """Refresh only our own lease row; a superseded process never extends another's."""
+        with self._lock:
+            self._db.execute("UPDATE service_lease SET heartbeat_at=? WHERE id=1 AND pid=?",
+                             (time.time(), os.getpid()))
+
+    def release_service_lease(self) -> None:
+        """Drop a cleanly stopped process's lease so an offline migration need not wait it out."""
+        with self._lock:
+            self._db.execute("DELETE FROM service_lease WHERE id=1 AND pid=?", (os.getpid(),))
+
+    def service_lease(self) -> dict | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT pid, started_at, heartbeat_at FROM service_lease WHERE id=1").fetchone()
+        return {"pid": row[0], "started_at": row[1], "heartbeat_at": row[2]} if row else None
 
     def close(self):
         with self._lock:

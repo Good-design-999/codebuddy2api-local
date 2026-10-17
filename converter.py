@@ -49,6 +49,7 @@ from app.adapters.anthropic_adapter import (
 )
 
 from app import auth_oauth
+from app.settings import SCHEMA
 from app import trial_rewards
 from app import buddy, daily_chat, checkin as checkin_service, model_policy, travel
 from app.credential_cooldowns import CredentialCooldowns
@@ -1873,6 +1874,19 @@ def _housekeep_once(pool: CredentialPool, ledger, *, pending_only=False):
             raise
         finally:
             pool.end_sync(ids, failed)
+
+
+LEASE_INTERVAL_S = 30  # Running-instance heartbeat; offline tools treat older leases as stale.
+
+
+def _lease_loop(store) -> None:
+    """Refresh the running-instance lease without touching the settings revision."""
+    while True:
+        time.sleep(LEASE_INTERVAL_S)
+        try:
+            store.heartbeat_service_lease()
+        except Exception:
+            pass
 
 
 def _housekeeper_loop(pool: CredentialPool, ledger) -> None:
@@ -4280,11 +4294,155 @@ def _boolean_arg(value):
     raise argparse.ArgumentTypeError("必须为 true 或 false")
 
 
+def _is_config_invocation(argv) -> bool:
+    """True when the first non-option token is the offline config command."""
+    for token in argv:
+        if token.startswith("-"):
+            continue
+        return token == "config"
+    return False
+
+
+def _persist_cli_language(language, store=None, config=None) -> None:
+    """`--lang` writes the interface language once; an unchanged value never bumps the revision."""
+    if not language:
+        return
+    owned = store is None
+    if store is None:
+        from app.control_store import ControlStore
+        path = managed_auth_dir() / "control.sqlite3"
+        if not path.exists():
+            sys.stderr.write("[lang] 配置库尚未创建，语言仅本次运行生效\n")
+            return
+        store = ControlStore(path)
+    try:
+        snapshot = store.snapshot()
+        if snapshot["settings"].get("language") != language:
+            store.update_settings({"language": language}, snapshot["revision"])
+        if config is not None:
+            config["language"] = language
+            config.setdefault("settings_sources", {})["language"] = "cli"
+    except Exception as error:
+        sys.stderr.write(f"[lang] 语言未保存: {error}\n")
+    finally:
+        if owned:
+            store.close()
+
+
+def _config_keys(raw):
+    keys = [item.strip() for item in str(raw or "").split(",") if item.strip()]
+    return keys or None
+
+
+def _config_status_lines(report, lang) -> list:
+    from app import i18n as cli_i18n
+
+    env_path = report["env_path"] or cli_i18n.tr(lang, "config.noEnv")
+    lease = report["lease"]
+    if lease and report["lease_fresh"]:
+        lease_text = cli_i18n.tr(lang, "config.running", pid=lease["pid"],
+                                 age=int(time.time() - lease["heartbeat_at"]))
+    elif lease:
+        lease_text = cli_i18n.tr(lang, "config.released")
+    else:
+        lease_text = cli_i18n.tr(lang, "config.idle")
+    pending = cli_i18n.tr(lang, "config.pending", count=len(report["changes"]))
+    if report["changes"]:
+        pending += f"（{', '.join(report['changes'])}）" if lang == "zh" else f" ({', '.join(report['changes'])})"
+    return [
+        cli_i18n.tr(lang, "config.envFile", path=env_path),
+        cli_i18n.tr(lang, "config.target", path=report["db_path"]),
+        cli_i18n.tr(lang, "config.schema", version=report["version"],
+                    revision=report["revision"], accounts=report["accounts"]),
+        cli_i18n.tr(lang, "config.state", state=lease_text),
+        pending,
+        cli_i18n.tr(lang, "config.unchanged", count=len(report["unchanged"])),
+    ]
+
+
+def config_command(args) -> int:
+    """Offline `config migrate|status`; never starts the server or touches credentials."""
+    from app import config_migration
+    from app import i18n as cli_i18n
+
+    if args.action is None:
+        sys.stderr.write(cli_i18n.tr(cli_i18n.resolve_language(args.lang), "config.usage") + "\n")
+        return 2
+    keys = _config_keys(args.keys)
+    options = {"env_file": args.env_file, "no_env": args.no_env,
+               "data_dir": args.data_dir, "db": args.db}
+    try:
+        if args.action == "status":
+            targets = config_migration.resolve_targets(**options)
+            info = config_migration.inspect_database(targets["db_path"])
+            values = config_migration.collect_runtime_values(targets["env_values"])
+            planned = config_migration.plan(values, info["settings"], keys=keys)
+            report = {"env_path": targets["env_path"], "db_path": targets["db_path"],
+                      "version": info["version"], "revision": info["revision"],
+                      "accounts": info["accounts"], "lease": info["lease"],
+                      "lease_fresh": config_migration.lease_is_fresh(info["lease"]),
+                      **planned}
+            lang = cli_i18n.resolve_language(args.lang or info["settings"].get("language"))
+            for line in _config_status_lines(report, lang):
+                print(line)
+            return 0
+        report = config_migration.migrate(**options, dry_run=args.dry_run, force=args.force,
+                                          keys=keys, language=args.lang)
+    except config_migration.MigrationError as error:
+        sys.stderr.write(f"[config] {error}\n")
+        return 2
+    lang = cli_i18n.resolve_language(args.lang or report.get("language")
+                                     or config_migration.inspect_database(report["db_path"])["settings"].get("language"))
+    for line in _config_status_lines(report, lang):
+        print(line)
+    if report["dry_run"]:
+        print(cli_i18n.tr(lang, "config.dryRun"))
+        return 0
+    if not report["written"]:
+        print(cli_i18n.tr(lang, "config.noChanges"))
+        return 0
+    env_names = []
+    for key, value in report["changes"].items():
+        name = SCHEMA[key].get("env")
+        if name:
+            rendered = str(value).lower() if isinstance(value, bool) else value
+            env_names.append(f"{name}={rendered}")
+    print(cli_i18n.tr(lang, "config.written", count=len(report["changes"]),
+                      revision=report["revision"]))
+    if report.get("language"):
+        print(cli_i18n.tr(lang, "config.language", language=report["language"]))
+    if env_names:
+        print(cli_i18n.tr(lang, "config.removeEnv"))
+        for line in env_names:
+            print(f"  {line}")
+    return 0
+
+
 def main():
-    dotenv_keys = set() if any(arg in ("-h", "--help") for arg in sys.argv[1:]) else load_startup_env()
+    offline_config = _is_config_invocation(sys.argv[1:])
+    if any(arg in ("-h", "--help") for arg in sys.argv[1:]) or offline_config:
+        dotenv_keys = set()
+    else:
+        dotenv_keys = load_startup_env()
     ap = argparse.ArgumentParser(description="CodeBuddy -> OpenAI 兼容转换器（直连后端）")
-    ap.add_argument("command", nargs="?", choices=("serve", "login"), default="serve",
-                    help="serve 启动服务（默认）；login 扫码登录、自动轮询并保存账号")
+    ap.add_argument("command", nargs="?", choices=("serve", "login", "config"), default="serve",
+                    help="serve 启动服务（默认）；login 扫码登录；config 离线配置迁移（migrate/status）")
+    ap.add_argument("action", nargs="?", choices=("migrate", "status"),
+                    help="config 子命令：migrate 写入配置库；status 只读查看解析结果")
+    ap.add_argument("--env-file", metavar="PATH",
+                    help="config 读取的 env 文件；默认当前目录 .env")
+    ap.add_argument("--no-env", action="store_true",
+                    help="config 不读取 env 文件，只使用进程环境变量")
+    ap.add_argument("--data-dir", metavar="PATH",
+                    help="config 目标数据目录（其中含 control.sqlite3）；默认按 CODEBUDDY_AUTH_DIR 解析")
+    ap.add_argument("--db", metavar="PATH",
+                    help="config 直接指定 control.sqlite3 路径")
+    ap.add_argument("--dry-run", action="store_true", help="config migrate 只打印差异，不写库")
+    ap.add_argument("--keys", metavar="LIST", help="config 仅处理逗号分隔的配置项")
+    ap.add_argument("--force", action="store_true",
+                    help="config migrate 在检测到运行中实例时仍然写入（危险）")
+    ap.add_argument("--lang", choices=("auto", "zh", "en"),
+                    help="界面与本次 CLI 输出语言；带该参数启动会把语言写入配置库（config status 只读）")
     ap.add_argument("--site", choices=tuple(auth_oauth.SITE_HOSTS), default="cn",
                     help="login 站点：cn 国内站（默认）；intl 国际 WorkBuddy；intl-codebuddy 国际 CodeBuddy")
     ap.add_argument("--no-browser", action="store_true",
@@ -4386,7 +4544,10 @@ def main():
     del args.auto_trial
     if args.image_policy not in ("truncate", "error"):
         ap.error("CODEBUDDY2API_IMAGE_POLICY 必须为 truncate 或 error")
+    if args.command == "config":
+        return config_command(args)
     if args.command == "login":
+        _persist_cli_language(args.lang)
         return login(site=args.site, open_browser=not args.no_browser)
 
     for key in ("max_images", "image_policy", "max_request_bytes", "log_body_limit",
@@ -4407,6 +4568,9 @@ def main():
     CONFIG["log_path"] = None
     from app import runtime_management
     runtime_management.initialize(sys.modules[__name__], args, parser=ap, dotenv_keys=dotenv_keys)
+    # The running-instance lease is claimed with the other background threads, after
+    # catalog and usage hydration, so an offline tool never races the first write.
+    control_store = CONFIG.get("control_store")
     # Validate effective binding and authentication before credential scans or background work.
     if (args.host not in ("127.0.0.1", "::1", "localhost") and not CONFIG.get("api_key")
             and not allows_open_noauth()):
@@ -4439,6 +4603,11 @@ def main():
         # a later start under the superseded key could adopt it and revive admin cookies.
         runtime_management.close(CONFIG)
         ap.error(str(error))
+    if control_store is not None:
+        control_store.claim_service_lease()
+        _persist_cli_language(args.lang, control_store, CONFIG)
+        threading.Thread(target=_lease_loop, args=(control_store,),
+                         daemon=True, name="service-lease").start()
     threading.Thread(target=_refresher_loop, args=(CONFIG["cred_pool"],),
                      daemon=True, name="cred-refresher").start()
     if credits_mod is not None:
@@ -4482,6 +4651,11 @@ def main():
     try:
         run_server(app, CONFIG, host=args.host, port=args.port)
     finally:
+        if CONFIG.get("control_store") is not None:
+            try:
+                CONFIG["control_store"].release_service_lease()
+            except Exception:
+                pass
         runtime_management.close(CONFIG)
 
 

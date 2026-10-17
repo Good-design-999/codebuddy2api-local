@@ -59,9 +59,10 @@ def validate_projection_max_bytes(value):
 
 def _item(default, type_, label, *, mode="hot", env=None, minimum=None, maximum=None,
           choices=None, sensitive=False, allow_empty=False, max_length=255, validator=None,
-          hidden=False):
+          hidden=False, env_scope="runtime", lockable=True):
     value = {"default": default, "type": type_, "label": label, "mode": mode,
-             "env": env, "sensitive": sensitive, "hidden": hidden}
+             "env": env, "sensitive": sensitive, "hidden": hidden,
+             "env_scope": env_scope, "lockable": lockable}
     if minimum is not None:
         value["min"] = minimum
     if maximum is not None:
@@ -78,13 +79,13 @@ def _item(default, type_, label, *, mode="hot", env=None, minimum=None, maximum=
 
 
 SCHEMA = {
-    "host": _item("127.0.0.1", "string", "监听地址", mode="restart", env="CODEBUDDY2API_BIND"),
-    "port": _item(8787, "integer", "监听端口", mode="restart", env="CODEBUDDY2API_PORT", minimum=1, maximum=65535),
-    "api_key": _item(None, "secret", "管理与推理密钥", mode="startup", env="CODEBUDDY2API_KEY", sensitive=True),
-    "auth_file": _item(None, "paths", "显式凭证文件", mode="startup", sensitive=True),
-    "auth_dir": _item(None, "path", "凭证目录", mode="startup", env="CODEBUDDY_AUTH_DIR", sensitive=True),
-    "import_dir": _item(None, "path", "导入目录", mode="startup", env="CODEBUDDY_IMPORT_DIR", sensitive=True),
-    "log_path": _item(None, "path", "旧文本日志（已停用）", mode="startup", env="CODEBUDDY2API_LOG", sensitive=True, hidden=True),
+    "host": _item("127.0.0.1", "string", "监听地址", mode="restart", env="CODEBUDDY2API_BIND", env_scope="deployment"),
+    "port": _item(8787, "integer", "监听端口", mode="restart", env="CODEBUDDY2API_PORT", minimum=1, maximum=65535, env_scope="deployment"),
+    "api_key": _item(None, "secret", "管理与推理密钥", mode="startup", env="CODEBUDDY2API_KEY", sensitive=True, env_scope="deployment"),
+    "auth_file": _item(None, "paths", "显式凭证文件", mode="startup", sensitive=True, env_scope="deployment"),
+    "auth_dir": _item(None, "path", "凭证目录", mode="startup", env="CODEBUDDY_AUTH_DIR", sensitive=True, env_scope="deployment"),
+    "import_dir": _item(None, "path", "导入目录", mode="startup", env="CODEBUDDY_IMPORT_DIR", sensitive=True, env_scope="deployment"),
+    "log_path": _item(None, "path", "旧文本日志（已停用）", mode="startup", env="CODEBUDDY2API_LOG", sensitive=True, hidden=True, env_scope="deployment"),
     "admin_allowed_origins": _item("", "string", "管理页额外信任来源", env="CODEBUDDY2API_ADMIN_ORIGINS",
                                    allow_empty=True, max_length=2000, validator=normalize_allowed_origins),
     "desensitize": _item(False, "boolean", "提示词脱敏"),
@@ -126,6 +127,11 @@ SCHEMA = {
     "trusted_proxies": _item("", "string", "可信代理地址（IP/CIDR，逗号分隔）",
                              env="CODEBUDDY2API_TRUSTED_PROXIES", allow_empty=True,
                              max_length=2000, validator=normalize_trusted_proxies),
+    # Interface preference: WebUI and `--lang` write it, nothing maps it from the environment.
+    "language": _item("auto", "string", "界面语言", choices=["auto", "zh", "en"],
+                      env_scope="ui", lockable=False),
+    # One-time migration notice; written by `config migrate` and the WebUI dismiss button.
+    "config_notice_muted": _item(False, "boolean", "配置迁移提醒已关闭", hidden=True, env_scope="none"),
 }
 
 
@@ -199,7 +205,8 @@ def resolve_settings(config):
         if spec.get("hidden"):  # Retired knobs stay out of the management UI.
             continue
         source = sources.get(key, "default")
-        locked = spec["sensitive"] or source in ("cli", "environment", "env", "dotenv")
+        locked = spec.get("lockable", True) and (
+            spec["sensitive"] or source in ("cli", "environment", "env", "dotenv"))
         item = {"key": key, "value": None if spec["sensitive"] else (config[key] if config.get(key) is not None else spec["default"]),
                 "stored": None if spec["sensitive"] else saved.get(key), "source": source,
                 "mode": spec["mode"], "type": spec["type"], "label": spec["label"], "locked": locked}

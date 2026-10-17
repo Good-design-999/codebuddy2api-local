@@ -246,6 +246,16 @@ class EnvironmentConfigTests(unittest.TestCase):
             self.start({'CODEBUDDY2API_REQUEST_CONTEXT_MODE': 'invalid'})
 
 
+    def test_language_is_never_locked_and_the_notice_flag_stays_hidden(self):
+        from app.settings import SCHEMA, resolve_settings
+        config = {"settings_sources": {key: "dotenv" for key in SCHEMA}}
+        config.update({key: spec["default"] for key, spec in SCHEMA.items()})
+        items = {item["key"]: item for item in resolve_settings(config)}
+        self.assertFalse(items["language"]["locked"])
+        self.assertEqual(items["language"]["value"], "auto")
+        self.assertNotIn("config_notice_muted", items)
+        self.assertTrue(items["host"]["locked"])
+
     def test_example_covers_all_active_runtime_environment_names(self):
         example = (ROOT / '.env.example').read_text()
         documented = set(re.findall(r'(?m)^(?:# )?(CODEBUDDY[A-Z0-9_]+)=', example))
@@ -267,6 +277,8 @@ class EnvironmentConfigTests(unittest.TestCase):
             self.skipTest('Compose plugin unavailable')
         dotenv = self.root / 'compose.env'
         dotenv.write_text(''.join(name + '=' + value + '\n' for name, value in values.items()))
+        # The service reads .env through env_file; point it at this batch instead of the checkout.
+        env['CODEBUDDY2API_ENV_FILE'] = str(dotenv)
         command = ['docker', 'compose', '--project-directory', str(self.root), '--env-file', str(dotenv),
                    '-f', str(ROOT / 'docker-compose.yml'), 'config', '--format', 'json']
         result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=20)
@@ -289,7 +301,8 @@ class EnvironmentConfigTests(unittest.TestCase):
         service = self.compose(values)
         port = service['ports'][0]
         self.assertEqual((port['host_ip'], str(port['published']), port['target']), ('127.0.0.2', '9087', 8787))
-        self.assertEqual(service['command'][:5], ['python3', 'converter.py', '--host', '0.0.0.0', '--port'])
+        # Compose inherits the image command instead of repeating the listener flags.
+        self.assertIsNone(service.get('command'))
         self.assertEqual(service['environment']['CODEBUDDY_AUTH_DIR'], '/data/auth')
         for name, value in values.items():
             if name not in ('CODEBUDDY2API_BIND', 'CODEBUDDY2API_PORT'):
@@ -306,7 +319,8 @@ class EnvironmentConfigTests(unittest.TestCase):
                      'CODEBUDDY2API_ADMIN_ORIGINS'):
             self.assertIsNone(service['environment'].get(name))
         self.assertEqual(service['ports'][0]['host_ip'], '127.0.0.1')
-        self.assertEqual(service['environment']['CODEBUDDY_IMPORT_DIR'], '/data/auth/imports')
+        # Container defaults to the data directory's imports/; .env may override it.
+        self.assertIsNone(service['environment'].get('CODEBUDDY_IMPORT_DIR'))
 
 
 if __name__ == '__main__':
